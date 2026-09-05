@@ -1,228 +1,442 @@
-# Subsidium — Faz 1 + Faz 2 (Retrieval) + Faz 3 (AI Provider + Editing) İskeleti
+<div align="center">
 
-Bu, kararlaştırılan yığına (Tauri + Rust + React/TS + tree-sitter + SQLite)
-göre oluşturulmuş **Faz 1** (workspace intelligence) ve **Faz 2** (retrieval)
-iskeletidir.
+<h1>
+  <span style="color:#174A3A;">◈ Subsidium</span>
+</h1>
 
-## Bu iskelette olan
+<p>
+  A local workspace-intelligence coding agent for your projects.
+</p>
 
-- **Frontend (`src/`)**: Workspace seçme butonu, dosya gezgini (tree view), ve
-  "Project Intelligence" paneli (tarama + indeks istatistikleri). Layout, sonraki
-  fazlarda gelecek code editor / agent chat / terminal / diff paneli için yer
-  ayrılmış şekilde tasarlandı.
-- **Workspace tarama (`src-tauri/src/workspace/`)**: `ignore` crate ile
-  `.gitignore` kurallarına saygılı, ayrıca `node_modules`, `.git`, `target`,
-  `dist`, `__pycache__` gibi klasörleri gitignore'dan bağımsız olarak da atlayan
-  bir tarayıcı. Sonucu hem düz dosya listesine hem UI için ağaç yapısına
-  dönüştürüyor.
-- **Parsing (`src-tauri/src/parsing/`)**: tree-sitter ile Rust, JavaScript,
-  TypeScript/TSX ve Python için fonksiyon/class/struct/enum/interface/type
-  sembol çıkarımı. Yeni bir dil eklemek = yeni bir grammar bağımlılığı +
-  `treesitter.rs`'e bir query — mimari değişmiyor.
-- **Indexing (`src-tauri/src/indexing/`)**: Workspace başına
-  `<workspace>/.subsidium/index.db` altında SQLite indeksi (`files`, `symbols`,
-  `symbols_fts`, ve ileriki fazlar için hazır duran boş `edges` tablosu).
-  İçerik hash'i değişmeyen dosyalar atlanarak **incremental indexing**
-  yapılıyor.
-- **Tauri komutları (`src-tauri/src/commands.rs`)**: `open_workspace` tüm
-  pipeline'ı (tara → parse et → indeksle) tek seferde çalıştırıp UI'nin
-  ihtiyaç duyduğu ağacı, tarama özetini ve indeks istatistiklerini döndürüyor.
-- **Retrieval (`src-tauri/src/retrieval/`)** — Faz 2: `search_workspace`
-  komutu üç yöntemi birleştirip tek, sıralanmış bir sonuç listesi döndürüyor:
-  - **Sembol adı arama**: `symbols` tablosunda LIKE ile substring eşleşmesi
-  - **Dosya adı arama**: `files` tablosunda yol substring eşleşmesi
-  - **Tam metin arama**: indekslenmiş her dosyayı diskten canlı okuyup
-    (içerik veritabanında ayrıca tutulmuyor — spec'in "kaynak kodun
-    tamamını düz metin halinde saklama" uyarısına uygun) satır satır arama
-  - Sorgu önce `retrieval::tokenize` ile identifier token'larına ayrılıyor
-    (`camelCase`/`snake_case` farkında), böylece doğal dil sorguları da
-    (`"token neden kayboluyor"`) ilgili sembol/dosya adlarını yakalayabiliyor.
-  - UI'de orta paneldeki **Search** kutusu bunu doğrudan çağırıyor —
-    henüz bir AI modeline bağlı değil, sonuçlar ham olarak gösteriliyor;
-    böylece bir sonraki fazda Context Engine'i buna bağlamadan önce
-    retrieval kalitesini gerçek workspace'lerde gözlemleyebiliyorsun.
+<br>
 
-## Bu iskelette olmayan (bilinçli olarak — sonraki fazlar)
+<img src="assets/screenshot.png" alt="Subsidium" width="950">
 
-Semantic/embedding index, dependency/reference graph (`edges` tablosu
-şemada hazır ama boş), terminal komutları için zaman aşımı (bkz.
-`agent::run_shell` içindeki not — bir komut asılırsa agent turn'ü de asılı
-kalır), çok adımlı/paralel tool call'ların aynı anda işlenmesi, gerçek
-Git işlemleri (commit/push/branch — bilinçli olarak eklenmedi, spec
-"kullanıcı adına geri döndürülemez işlemler izinsiz yapılmamalı" diyor;
-şu an yalnızca salt-okunur `git status`/`git diff` var).
+</div>
 
-## Arayüz ve UX güncellemeleri (bu turda eklenenler)
+<br>
 
-- **Resizable panel sistemi**: Sabit piksel genişlikli 3 sütun yerine
-  `react-resizable-panels` ile gerçek, sürüklenebilir panel sistemi geldi
-  (Explorer / Editor / sağ dock). Bu aynı zamanda önceki bir bug'ı da
-  çözdü: uzun bir kod satırı editörü CSS grid'de genişletip sağdaki Agent
-  panelini görünüm dışına itebiliyordu (`min-w-0` eksikliği + CodeMirror'da
-  satır kaydırma olmaması) — artık editör satırları sarıyor ve panel'ler
-  taşmıyor.
-- **Görsel dil**: Mor/gradient "AI ürünü" paletinden uzaklaşıp koyu
-  grafit + kehribar/pirinç tonlu, geliştirici aracı hissi veren bir
-  palete geçildi (`tailwind.config.js`). Her yerde BÜYÜK HARF etiket
-  kullanımı azaltıldı (şablon/demo hissi veren en belirgin işaretlerden
-  biriydi).
-- **Sohbet geçmişi**: Agent konuşmaları artık workspace'in
-  `.subsidium/index.db`'sinde kalıcı (`conversations` /
-  `conversation_messages` tabloları). Agent panelindeki **History**
-  butonuyla geçmiş konuşmaları listeleyip açabiliyor, silebiliyorsun.
-  Geçmiş bir konuşmayı açtıktan sonra mesaj göndermeye devam edersen o
-  konuşma güncellenir (yeni bir tane oluşturulmaz).
-- **Alt bilgi**: Sayfanın en altında ortalanmış küçük "Made by
-  FraisenSenpai with ❤️" yazısı.
+## Overview
 
-## Gemini'ye özel düzeltme
+Subsidium is a desktop coding environment built around your workspace.
 
-Bazı Gemini "thinking" modelleri, bir `functionCall`'a eşlik eden
-`thoughtSignature` alanının bir sonraki turda aynen geri gönderilmesini
-zorunlu tutuyor, yoksa 400 hatası veriyor. `ToolCall` artık bu alanı
-taşıyor (yalnızca Gemini dolduruyor, diğer sağlayıcılarda hep `None`) ve
-`gemini.rs` bunu functionCall part'ının yanında geri gönderiyor.
+It brings the file explorer, code editor, terminal, search, Git information and an agent into one place. The agent can inspect your project, search through files, read code and perform actions when you allow it.
 
-## Bu turda eklenenler — Onboarding, çoklu provider, tema, thinking
+Built with **Tauri, Rust and React**.
 
-- **İlk açılış (onboarding)**: Hiç provider yoksa uygulama ana ekran yerine
-  tam sayfa bir kurulum ekranı gösteriyor — en az bir tane ekleyene kadar
-  devam edilemiyor, **kaç tane ekleyeceğin tamamen sana kalmış** ("+ Add
-  another provider" ile istediğin kadar hesap ekleyebilirsin).
-- **Çoklu provider desteği**: Artık tek bir `provider.json` yerine
-  `providers.json` içinde bir **liste** var (her hesabın kendi `id`'si,
-  ismi, sağlayıcı tipi, modeli), her hesabın API key'i keychain'de kendi
-  `id`'sine göre ayrı tutuluyor. **AI Settings** artık tek form değil, tam
-  bir yönetici: hesapları listele, birini "active" yap (agent hep aktif
-  olanı kullanır), düzenle, sil.
-- **Açık/koyu tema**: Sağ üstteki güneş/ay butonuyla değiştiriliyor,
-  tercih `localStorage`'da kalıcı. Renkler CSS custom property'leri
-  üzerinden geliyor (`styles.css`), Tailwind bunlara `rgb(var(--c-x) /
-  <alpha-value>)` ile bağlanıyor — tema değişince tüm `bg-accent`,
-  `text-muted` vb. class'lar otomatik güncelleniyor.
-- **Marka rengi**: "Subsidium" yazısı ve başlıktaki nokta artık sabit koyu
-  yeşil (`text-brand` / `bg-brand`) — temadan bağımsız, her zaman aynı
-  yeşil tonu.
-- **Thinking (düşünme süreci)**: Agent panelinde asistan mesajlarının
-  üstünde "▸ thinking…" diye açılabilir bir bölüm var. Bu **best-effort
-  ve sağlayıcıya göre değişken**:
-  - **Gemini**: `thinkingConfig.includeThoughts: true` ile açıkça
-    istiyoruz, model destekliyorsa geliyor.
-  - **Ollama**: `"think": true` ile istiyoruz (deepseek-r1, qwq gibi
-    reasoning modellerinde çalışır, diğerlerinde yok sayılır).
-  - **OpenAI-uyumlu**: Standart değil; bazı gateway'ler (OpenRouter gibi)
-    `reasoning` alanı döndürürse pasif olarak yakalanıyor, istemiyoruz.
-  - **Anthropic**: Extended thinking bilinçli olarak **açılmadı** — tool
-    use ile birlikte kullanıldığında signature doğrulama kuralları var ve
-    canlı test olmadan doğru yapmak riskli; şu an bu sağlayıcıda thinking
-    hiç gelmiyor.
-- **Hangi modelle konuştuğun**: Agent panelinin üst çubuğunda artık aktif
-  hesabın adı + o anki turu gerçekten yanıtlayan model görünüyor.
+---
 
-## Faz 5'te eklenenler — Diff Review + Git
+## How It Works
 
-- **Diff/review akışı**: Agent bir `write_file` önerdiğinde, onay
-  kartında artık sadece "N byte yazılacak" değil, diskteki mevcut
-  içerikle önerilen içerik arasındaki **gerçek satır satır diff**
-  gösteriliyor (`similar` crate ile hesaplanıyor — eklenen satırlar yeşil,
-  silinenler kırmızı). Kullanıcı neyin değişeceğini görmeden onay
-  vermiyor.
-- **Git entegrasyonu**: İki yeni salt-okunur agent aracı —
-  `git_status` ve `git_diff` — model değişiklik önermeden önce mevcut
-  çalışma durumunu görebiliyor (spec'in "agent değişikliklerden önce
-  mevcut durumu anlayabilmeli" gereksinimi). Ayrıca sağ panelde ayrı bir
-  **Git** sekmesi var — kullanıcı bağımsız olarak "Refresh" ile
-  `git status`/`git diff` çıktısını görebiliyor. Git komutları sistem
-  `git`'ini shell üzerinden çağırıyor (git2 gibi bir crate eklemedik);
-  repo değilse veya git kurulu değilse sert hata vermek yerine bunu
-  metin olarak bildiriyor.
-- **Bilinçli olarak eklenmeyen**: commit/push/branch gibi geri
-  dönüşü zor ya da uzak repo'yu etkileyen Git işlemleri — spec bunları
-  kullanıcı kontrolünde tutmayı istiyor, otomatik/agent-tetiklemeli
-  olarak eklenmedi.
+Subsidium is built around a simple workflow:
 
-## Faz 4'te eklenenler — Agent tool loop
+```text
+Choose a workspace
+       ↓
+Explore the project
+       ↓
+Ask the agent
+       ↓
+Inspect what it wants to do
+       ↓
+Approve when needed
+       ↓
+Continue working
+```
 
-- **Tool-calling desteği (`src-tauri/src/providers/`)**: `AiProvider`
-  trait'ine `send_agent_turn` eklendi — dört provider'ın da (Anthropic,
-  Gemini, OpenAI-uyumlu, Ollama) kendi tool-calling şemasına çeviren bir
-  implementasyonu var. Sağlayıcılar arası format farkları ciddi (Anthropic
-  `tool_use`/`tool_result` content block'ları, OpenAI `tool_calls` +
-  JSON-string argümanlar, Gemini `functionCall`/`functionResponse`, Ollama
-  OpenAI'a benzer ama argümanlar zaten obje) — her biri kendi dosyasında
-  izole, `agent`/`commands` katmanı bu farkları hiç görmüyor.
-- **Agent modülü (`src-tauri/src/agent/mod.rs`)**: Beş araç tanımlı —
-  `read_file`, `list_files`, `search_code` (salt okunur, otomatik
-  çalışıyor) ve `write_file`, `run_command` (**kullanıcı onayı
-  gerektiriyor**). `run_command` platforma göre `cmd /C` (Windows) veya
-  `sh -c` (diğer) ile workspace root'unda çalışıyor — **bilinen sınır: bir
-  zaman aşımı yok**, girdi bekleyen bir komut agent turn'ünü asılı bırakır.
-- **Onay akışı**: Model `write_file`/`run_command` istediğinde loop
-  duruyor, sağdaki **Agent** panelinde bir onay kartı çıkıyor
-  (**Approve**/**Deny**). Onaylanırsa araç çalışıyor ve sonucu modele
-  geri besleniyor (agent devam ediyor); reddedilirse model "kullanıcı
-  reddetti" bilgisini alıp devam ediyor — sessizce iptal olmuyor.
-  `write_file` onaylanıp çalıştığında, o dosya editörde açıksa otomatik
-  yeniden yükleniyor.
-- **Oturum token toplamı**: Agent panelinin üstünde konuşma boyunca
-  toplanan input/output token sayısı görünüyor (Faz 3'teki tekil-çağrı
-  gösteriminin üzerine, artık kümülatif).
-- **Adım limiti**: Bir kullanıcı mesajı en fazla `agent::MAX_STEPS` (12)
-  provider round-trip'i tetikleyebilir — model aynı salt-okunur aracı
-  sonsuz çağırırsa loop kendini durdurup kullanıcıya haber veriyor.
+The workspace is the center of everything.
 
-## Faz 3'te eklenenler
+When a folder is opened, Subsidium discovers its files, indexes supported source code and connects the editor, terminal, search and agent to that workspace.
 
-- **AI Provider katmanı (`src-tauri/src/providers/`)**: `AiProvider` trait'i
-  + dört implementasyon (`anthropic.rs`, `gemini.rs` — Google'ın native
-  `generateContent` API'si, OpenAI şemasından farklı olduğu için ayrı bir
-  implementasyon —, `openai_compatible.rs` — çoğu ticari API bu şemaya
-  uyduğu için tek implementasyon çoğunu kapsıyor —, `ollama.rs`).
-  Sağlayıcı ayarları (hangi sağlayıcı, base URL, model)
-  `<OS config dizini>/subsidium/provider.json`'da; **API key hiçbir zaman
-  diske yazılmıyor**, OS'in native credential store'una (`keyring` crate —
-  Windows Credential Manager) yazılıyor. Sağ üstteki **AI Settings**
-  butonundan sağlayıcı seçip key/model girip **Test Connection** ile
-  doğrulayabilirsin — her yanıt hangi modelin cevap verdiğini ve
-  input/output token sayısını da gösteriyor (`AiResponse` — ileride agent
-  tool loop'unda oturum boyunca toplam token kullanımını buradan
-  biriktireceğiz).
-- **Kod editleme sistemi**: Explorer'da bir dosyaya tıklayınca ortadaki
-  panelde CodeMirror tabanlı bir editör açılıyor (dile göre syntax
-  highlighting: TS/TSX/JS/Python/Rust/JSON/HTML/CSS/Markdown). `Ctrl+S`
-  veya **Save** butonuyla `write_file` komutu dosyayı diske yazıyor ve
-  arkasından o dosyayı tek başına yeniden indeksliyor (`reindex_file`) —
-  tam workspace taraması yapmadan search/symbol sonuçları güncel kalıyor.
-  Bu, ileride agent'ın önerdiği değişiklikleri onaylayıp uygulayacağın
-  diff/review akışının da üzerine kurulacağı aynı yazma yolu.
+---
 
-### Faz 3 kurulum notu
+## Interface
 
-`npm install` bu sefer CodeMirror paketlerini de indirecek. Rust tarafında
-yeni bağımlılıklar (`reqwest`, `keyring`, `dirs`, `async-trait`) ilk
-`npm run tauri dev` çalıştırmasında otomatik inecek — biraz daha derleme
-süresi ekleyecek ama tek seferlik.
+### Explorer
 
-## Kurulum
+Browse the current workspace through a familiar file tree.
+
+* Folder and file navigation
+* Collapsible directories
+* Open files directly in the editor
+* Workspace selection
+* `.gitignore` aware file discovery
+
+### Editor
+
+A CodeMirror-based editor for working directly on your files.
+
+Supported syntax includes:
+
+* JavaScript / TypeScript
+* Python
+* Rust
+* CSS
+* HTML
+* JSON
+* Markdown
+
+Changes are saved to disk and the workspace index is updated accordingly.
+
+### Terminal
+
+A real interactive terminal runs alongside the editor.
+
+On Windows, Subsidium uses a PTY-backed `cmd.exe` session rooted in the selected workspace.
+
+It supports:
+
+* Interactive commands
+* Live output
+* Running development servers
+* Process termination
+* Clearing the terminal
+* Commands initiated by the agent
+
+### Agent
+
+The agent is the main interaction layer.
+
+It can inspect the workspace through tools such as:
+
+```text
+search_code
+read_file
+git_status
+git_diff
+```
+
+Actions that can modify the workspace require approval:
+
+```text
+write_file
+run_command
+```
+
+Before a file is changed, Subsidium shows the proposed change for review.
+
+Before a command is executed, you can approve or deny it.
+
+You remain in control of changes made to the workspace.
+
+### Search
+
+Search across the workspace for:
+
+* File names
+* Symbols
+* Full-text matches
+
+The current implementation exposes raw search results. Later versions will use the same index as part of the agent's context.
+
+### Intel
+
+A quick overview of the current workspace.
+
+Currently available:
+
+* File count
+* Language breakdown
+* Index information
+
+Project-level summaries are planned for a later phase.
+
+### Git
+
+Git information directly inside the workspace.
+
+Currently available:
+
+```text
+git status
+git diff
+```
+
+Git operations such as committing and pushing are outside the current scope.
+
+---
+
+## Workspace Index
+
+When a workspace is opened, Subsidium builds an index of the project.
+
+```text
+Workspace
+   │
+   ├── File discovery
+   │      └── .gitignore rules
+   │
+   ├── Source parsing
+   │      └── Tree-sitter
+   │
+   ├── Metadata
+   │
+   └── SQLite index
+```
+
+Supported source files are parsed structurally where possible rather than being treated only as plain text.
+
+This provides the foundation for faster search and deeper workspace understanding in later versions.
+
+---
+
+## Agent Architecture
+
+The agent communicates with a configured model through a provider abstraction.
+
+Supported providers include:
+
+* Anthropic
+* Gemini
+* OpenAI-compatible APIs
+* Ollama
+
+The model does not directly receive the entire workspace.
+
+Instead, it interacts with the project through tools.
+
+### Read-only tools
+
+These can run without confirmation:
+
+```text
+search_code
+read_file
+git_status
+git_diff
+```
+
+### Privileged tools
+
+These require explicit approval:
+
+```text
+write_file
+run_command
+```
+
+A typical interaction looks like:
+
+```text
+User
+ │
+ ▼
+Agent
+ │
+ ├── search_code
+ │
+ ├── read_file
+ │
+ ├── git_diff
+ │
+ └── write_file ──► Approval
+                       │
+                  Approve / Deny
+                       │
+                       ▼
+                    Workspace
+```
+
+The distinction between reading and modifying the workspace is intentional.
+
+---
+
+## Conversations
+
+Conversations are stored locally using SQLite.
+
+You can:
+
+* Start a new conversation
+* Continue previous conversations
+* Load conversation history
+* Reset the current workspace conversation
+
+Changing the workspace starts a fresh conversation context.
+
+---
+
+## Settings
+
+### Providers
+
+Configure:
+
+* Provider
+* API key
+* Model
+* Base URL where applicable
+* Active provider
+
+API keys are stored using the operating system's secure keyring.
+
+### Application
+
+Configure:
+
+* Token budget
+* Usage counter
+* Theme
+
+---
+
+## Tech Stack
+
+### Desktop
+
+* Tauri
+* Rust
+
+### Frontend
+
+* React
+* TypeScript
+* CodeMirror
+
+### Workspace
+
+* Tree-sitter
+* SQLite
+* Git
+
+### Terminal
+
+* portable-pty
+
+### Providers
+
+* Anthropic
+* Gemini
+* OpenAI-compatible APIs
+* Ollama
+
+---
+
+## Project Status
+
+Subsidium is currently in **Phase 1**.
+
+The core desktop environment and agent loop are working, but the project is still under active development.
+
+### Working
+
+* [x] Workspace selection
+* [x] File explorer
+* [x] Code editor
+* [x] Syntax highlighting
+* [x] Workspace indexing
+* [x] Tree-sitter parsing
+* [x] SQLite index
+* [x] Workspace search
+* [x] Interactive terminal
+* [x] Agent chat
+* [x] Read-only agent tools
+* [x] Privileged tool approval
+* [x] File write approval
+* [x] File diffs
+* [x] Git status
+* [x] Git diff
+* [x] Conversation history
+* [x] Multiple AI providers
+* [x] Secure API key storage
+* [x] Dark / light themes
+
+### Planned
+
+* [ ] Background file watching
+* [ ] Automatic re-indexing
+* [ ] Project summaries
+* [ ] Improved diff review
+* [ ] Persistent agent memory
+* [ ] Multiple workspaces
+* [ ] More Tree-sitter languages
+* [ ] Deeper code intelligence
+* [ ] Improved agent workflows
+
+---
+
+## Development
+
+Clone the repository:
+
+```bash
+git clone https://github.com/fraisensenpai/Subsidium.git
+cd Subsidium
+```
+
+Install dependencies:
 
 ```bash
 npm install
-npm run tauri icon path/to/logo.png   # gerçek uygulama ikonlarını üretir
-                                        # (src-tauri/tauri.conf.json bunları bekliyor)
+```
+
+Start the development application:
+
+```bash
 npm run tauri dev
 ```
 
-Gereksinimler: Rust toolchain (stable), Node.js, ve Tauri'nin platforma özgü
-sistem bağımlılıkları (Windows: WebView2 — genelde zaten kurulu; Linux:
-`webkit2gtk`, `libayatana-appindicator3` vb. — bkz. Tauri v2 "Prerequisites"
-dokümantasyonu; macOS: ek bir şey gerekmiyor).
+---
 
-## Not
+## Philosophy
 
-`src-tauri/src/parsing/treesitter.rs` içindeki tree-sitter grammar crate'lerinin
-giriş fonksiyonları (`LANGUAGE`, `LANGUAGE_TYPESCRIPT` vb.) sürüm sürüm
-değişebiliyor; `cargo build` burada bir sembol bulamazsa ilgili crate'in
-docs.rs sayfasına bakıp yalnızca bu dosyayı güncellemek yeterli — geri kalan
-mimari buna bağlı değil. Bu iskelet, GUI/webview kütüphaneleri barındırmayan bu
-sandbox ortamında derlenerek doğrulanmadı; kendi makinende `npm run tauri dev`
-ile ilk çalıştırmayı yapman gerekiyor.
+**The workspace comes first.**
+
+The agent should understand the project it is working in instead of treating every request as an isolated prompt.
+
+**Actions should be visible.**
+
+Reading a project and changing a project are different things. Changes and commands should not happen silently.
+
+**Local-first.**
+
+The application, workspace index, conversations and terminal live on your machine. The model provider is configurable.
+
+**Build the environment, not just the chat.**
+
+The goal is not another chat window with a code editor attached to it. The goal is a single environment where the project, tools and agent can work together.
+
+---
+
+## Roadmap
+
+Subsidium is being developed incrementally.
+
+```text
+Phase 1
+Workspace + Editor + Terminal + Agent
+        │
+        ▼
+Phase 2
+Deeper Workspace Intelligence
+        │
+        ▼
+Phase 3
+Context & Retrieval
+        │
+        ▼
+Phase 4
+Agent Improvements
+        │
+        ▼
+Phase 5
+Production Hardening
+```
+
+The architecture is being built so later capabilities can be added without replacing the core workspace layer.
+
+---
+
+## License
+
+See [LICENSE](LICENSE).
+
+<br>
+
+<div align="center">
+
+**Subsidium**
+
+Built with Rust, React and a lot of iteration.
+
+</div>
