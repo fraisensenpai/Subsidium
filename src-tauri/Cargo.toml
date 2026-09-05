@@ -1,0 +1,60 @@
+[package]
+name = "subsidium"
+version = "0.1.0"
+description = "Subsidium — local workspace-intelligence coding agent (Phase 1 skeleton)"
+edition = "2021"
+
+[lib]
+name = "subsidium_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# AI provider layer: HTTP client for Anthropic / OpenAI-compatible / Ollama
+# APIs, async-trait so `Box<dyn AiProvider>` works, keyring for OS-native
+# secure API key storage, dirs for a per-user app config file (non-secret
+# provider/model settings only — never the key itself).
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+keyring = "2"
+dirs = "5"
+
+# Real pseudo-terminal for the Terminal panel — programs run inside an
+# actual TTY (ConPTY on Windows, forkpty elsewhere), so interactive
+# commands (input(), REPLs, prompts) behave exactly as they would in a
+# normal terminal: they see keyboard input, echo keystrokes, and render
+# prompts/colors.
+portable-pty = "0.8"
+
+# Unified diffs for the write_file approval card — shows the agent's
+# proposed change before the user approves it, not just a byte count.
+similar = "2"
+
+# Workspace discovery: respects .gitignore-style rules out of the box,
+# parallel directory walking.
+ignore = "0.4"
+
+# Structural index storage. Bundled so users don't need system sqlite.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# AST-based parsing (Phase 1: JS/TS, Python, Rust — more languages are
+# added by plugging in another tree-sitter grammar + query file, no
+# core engine changes required).
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-javascript = "0.21"
+tree-sitter-typescript = "0.21"
+tree-sitter-python = "0.21"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

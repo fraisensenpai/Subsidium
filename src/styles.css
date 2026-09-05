@@ -1,0 +1,279 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Only interactive controls get a pointer — disabled buttons and
+     non-interactive elements keep the default arrow. */
+  button:not(:disabled),
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgb(var(--c-accent) / 0.28);
+  }
+
+  input[type="number"]::-webkit-inner-spin-button {
+    opacity: 1;
+  }
+}
+
+/* Subsidium is green-themed: --c-brand is the fixed wordmark color (same
+   in both themes), while --c-accent is the interactive/highlight color
+   and is tuned per theme for contrast against the background. */
+
+:root {
+  --c-base: 250 250 248;
+  --c-panel: 255 255 255;
+  --c-panel2: 244 243 240;
+  --c-border: 222 221 216;
+  --c-ink: 23 24 22;
+  --c-muted: 103 106 101;
+  --c-accent: 27 122 69;
+  --c-accent-dim: 20 95 55;
+  --c-good: 34 122 71;
+  --c-bad: 176 58 46;
+  --c-brand: 21 107 58;
+}
+
+.dark {
+  --c-base: 10 12 11;
+  --c-panel: 19 21 20;
+  --c-panel2: 24 27 25;
+  --c-border: 37 41 38;
+  --c-ink: 228 230 224;
+  --c-muted: 138 143 136;
+  --c-accent: 58 176 108;
+  --c-accent-dim: 42 130 82;
+  --c-good: 106 179 112;
+  --c-bad: 197 100 93;
+  --c-brand: 21 107 58;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: rgb(var(--c-base));
+  color: rgb(var(--c-ink));
+  font-family: "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13.5px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-border));
+  border-radius: 6px;
+}
+
+/* Chat messages fade + slide in softly instead of popping. Applied per
+   message; a tiny stagger (added inline as animation-delay) makes a burst
+   of new messages cascade in. */
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.msg-in {
+  animation: message-in 0.28s cubic-bezier(0.21, 0.6, 0.35, 1) both;
+}
+
+/* Tool-use chips / approval cards get a lighter entrance. */
+@keyframes chip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.chip-in {
+  animation: chip-in 0.22s ease-out both;
+}
+
+/* Busy indicator: three softly pulsing dots next to "Working…" */
+@keyframes dot-pulse {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: rgb(var(--c-accent));
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+.dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* Smooth chat scroll when a new message lands. */
+.chat-scroll {
+  scroll-behavior: smooth;
+}
+
+/* Markdown-rendered agent replies (see components/Markdown.tsx). Follows
+   the theme via the CSS variables; tuned to read well inside the chat
+   bubble at 13.5px. */
+.markdown {
+  font-size: 13.5px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: 0.45em 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-weight: 650;
+  margin: 0.75em 0 0.35em;
+  line-height: 1.3;
+}
+.markdown h1 {
+  font-size: 1.12em;
+}
+.markdown h2 {
+  font-size: 1.06em;
+}
+.markdown h3,
+.markdown h4 {
+  font-size: 1em;
+}
+.markdown strong {
+  font-weight: 650;
+  color: rgb(var(--c-ink));
+}
+.markdown em {
+  font-style: italic;
+}
+.markdown code {
+  font-family: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, "SFMono-Regular", monospace;
+  font-size: 0.88em;
+  background: rgb(var(--c-panel2));
+  border: 1px solid rgb(var(--c-border));
+  padding: 0.08em 0.35em;
+  border-radius: 5px;
+}
+.markdown pre {
+  background: rgb(var(--c-base));
+  border: 1px solid rgb(var(--c-border));
+  border-radius: 8px;
+  padding: 0.7em 0.85em;
+  overflow-x: auto;
+  margin: 0.55em 0;
+}
+.markdown pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 0.88em;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0.45em 0;
+  padding-left: 1.4em;
+}
+.markdown li {
+  margin: 0.18em 0;
+}
+.markdown a {
+  color: rgb(var(--c-accent));
+  text-decoration: underline;
+}
+.markdown blockquote {
+  border-left: 3px solid rgb(var(--c-border));
+  padding-left: 0.8em;
+  color: rgb(var(--c-muted));
+  margin: 0.5em 0;
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.55em 0;
+  width: 100%;
+  font-size: 0.95em;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid rgb(var(--c-border));
+  padding: 0.3em 0.55em;
+  text-align: left;
+}
+.markdown th {
+  background: rgb(var(--c-panel2));
+  font-weight: 600;
+}
+.markdown hr {
+  border: none;
+  border-top: 1px solid rgb(var(--c-border));
+  margin: 0.8em 0;
+}
+
+/* The terminal emulator sits on the app background; its own scrollbar is
+   restyled to match the rest of the UI. */
+.xterm {
+  height: 100%;
+}
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+  scrollbar-width: thin;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-border));
+  border-radius: 6px;
+}
+
+/* react-resizable-panels drag handles — thin by default, lit up on hover
+   so they read as "grab here" without a permanent visual seam everywhere. */
+.resize-handle {
+  position: relative;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.resize-handle:hover,
+.resize-handle[data-resize-handle-active] {
+  background: rgb(var(--c-accent));
+}
+.resize-handle-h {
+  width: 1px;
+}
+.resize-handle-v {
+  height: 1px;
+}
