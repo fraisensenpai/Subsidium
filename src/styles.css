@@ -11,44 +11,59 @@
   }
 
   ::selection {
-    background: rgb(var(--c-accent) / 0.28);
+    background: rgb(var(--c-accent) / 0.24);
   }
 
   input[type="number"]::-webkit-inner-spin-button {
     opacity: 1;
   }
+
+  /* A single, consistent keyboard-focus treatment across the app. Mouse
+     clicks don't trigger it (focus-visible only). */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-accent) / 0.5);
+    outline-offset: 1px;
+  }
 }
 
-/* Subsidium is green-themed: --c-brand is the fixed wordmark color (same
-   in both themes), while --c-accent is the interactive/highlight color
-   and is tuned per theme for contrast against the background. */
-
+/* Subsidium keeps a restrained, product-not-demo palette: warm neutral
+   surfaces with a single deep pine-green accent. No gradients, no neon.
+   --c-brand is the wordmark/logo green (tuned per theme for contrast);
+   --c-accent is the interactive highlight. */
 :root {
-  --c-base: 250 250 248;
+  --c-base: 246 246 244;
   --c-panel: 255 255 255;
-  --c-panel2: 244 243 240;
-  --c-border: 222 221 216;
-  --c-ink: 23 24 22;
-  --c-muted: 103 106 101;
-  --c-accent: 27 122 69;
-  --c-accent-dim: 20 95 55;
-  --c-good: 34 122 71;
-  --c-bad: 176 58 46;
-  --c-brand: 21 107 58;
+  --c-panel2: 240 240 237;
+  --c-sunken: 236 236 232;
+  --c-border: 227 227 222;
+  --c-border-strong: 205 206 199;
+  --c-ink: 26 27 24;
+  --c-muted: 108 112 104;
+  --c-accent: 28 118 73;
+  --c-accent-dim: 21 90 55;
+  --c-good: 40 122 76;
+  --c-bad: 178 74 58;
+  --c-warn: 172 128 44;
+  --c-brand: 23 73 58;
+  --shadow-rgb: 24 28 24;
 }
 
 .dark {
-  --c-base: 10 12 11;
-  --c-panel: 19 21 20;
-  --c-panel2: 24 27 25;
-  --c-border: 37 41 38;
-  --c-ink: 228 230 224;
-  --c-muted: 138 143 136;
-  --c-accent: 58 176 108;
-  --c-accent-dim: 42 130 82;
-  --c-good: 106 179 112;
-  --c-bad: 197 100 93;
-  --c-brand: 21 107 58;
+  --c-base: 13 15 14;
+  --c-panel: 21 24 22;
+  --c-panel2: 28 33 30;
+  --c-sunken: 9 11 10;
+  --c-border: 40 46 43;
+  --c-border-strong: 58 66 61;
+  --c-ink: 230 233 229;
+  --c-muted: 141 148 141;
+  --c-accent: 61 181 118;
+  --c-accent-dim: 45 136 89;
+  --c-good: 96 188 128;
+  --c-bad: 205 106 96;
+  --c-warn: 210 168 86;
+  --c-brand: 82 180 130;
+  --shadow-rgb: 0 0 0;
 }
 
 html,
@@ -61,17 +76,52 @@ body,
 body {
   background-color: rgb(var(--c-base));
   color: rgb(var(--c-ink));
-  font-family: "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  font-size: 13.5px;
+  font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", ui-sans-serif,
+    system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
+/* Thin, low-contrast scrollbars that recede until you interact. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgb(var(--c-border));
-  border-radius: 6px;
+  background: rgb(var(--c-border-strong) / 0.6);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--c-border-strong));
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  /* Layered elevation, themed via --shadow-rgb so it works in both themes. */
+  .elev-1 {
+    box-shadow: 0 1px 2px rgb(var(--shadow-rgb) / 0.06), 0 1px 3px rgb(var(--shadow-rgb) / 0.05);
+  }
+  .elev-2 {
+    box-shadow: 0 4px 16px rgb(var(--shadow-rgb) / 0.12), 0 2px 5px rgb(var(--shadow-rgb) / 0.07);
+  }
+  .elev-3 {
+    box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.28), 0 6px 16px rgb(var(--shadow-rgb) / 0.16);
+  }
+
+  /* Small uppercase section label used across panels and settings. */
+  .micro-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgb(var(--c-muted));
+  }
 }
 
 /* Chat messages fade + slide in softly instead of popping. Applied per
@@ -80,15 +130,15 @@ body {
 @keyframes message-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.985);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 .msg-in {
-  animation: message-in 0.28s cubic-bezier(0.21, 0.6, 0.35, 1) both;
+  animation: message-in 0.26s cubic-bezier(0.21, 0.6, 0.35, 1) both;
 }
 
 /* Tool-use chips / approval cards get a lighter entrance. */
@@ -133,6 +183,18 @@ body {
   animation-delay: 0.3s;
 }
 
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.fade-in {
+  animation: fade-in 0.16s ease-out both;
+}
+
 /* Smooth chat scroll when a new message lands. */
 .chat-scroll {
   scroll-behavior: smooth;
@@ -140,9 +202,9 @@ body {
 
 /* Markdown-rendered agent replies (see components/Markdown.tsx). Follows
    the theme via the CSS variables; tuned to read well inside the chat
-   bubble at 13.5px. */
+   bubble at 13px. */
 .markdown {
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 1.65;
   word-break: break-word;
 }
@@ -189,7 +251,7 @@ body {
   border-radius: 5px;
 }
 .markdown pre {
-  background: rgb(var(--c-base));
+  background: rgb(var(--c-sunken));
   border: 1px solid rgb(var(--c-border));
   border-radius: 8px;
   padding: 0.7em 0.85em;
@@ -202,6 +264,36 @@ body {
   padding: 0;
   font-size: 0.88em;
 }
+/* Fenced code blocks get a copy button (see Markdown.tsx). The wrapper just
+   anchors the button; spacing matches the pre it replaced. */
+.code-block {
+  position: relative;
+  margin: 0.55em 0;
+}
+.code-block pre {
+  margin: 0;
+}
+.code-copy {
+  position: absolute;
+  top: 0.4em;
+  right: 0.4em;
+  font-size: 10px;
+  line-height: 1;
+  padding: 0.3em 0.5em;
+  border-radius: 5px;
+  color: rgb(var(--c-muted));
+  background: rgb(var(--c-panel));
+  border: 1px solid rgb(var(--c-border));
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.code-block:hover .code-copy,
+.code-copy:focus-visible {
+  opacity: 1;
+}
+.code-copy:hover {
+  color: rgb(var(--c-ink));
+}
 .markdown ul,
 .markdown ol {
   margin: 0.45em 0;
@@ -213,6 +305,7 @@ body {
 .markdown a {
   color: rgb(var(--c-accent));
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .markdown blockquote {
   border-left: 3px solid rgb(var(--c-border));
@@ -256,7 +349,7 @@ body {
   height: 10px;
 }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgb(var(--c-border));
+  background: rgb(var(--c-border-strong) / 0.6);
   border-radius: 6px;
 }
 
@@ -264,7 +357,7 @@ body {
    so they read as "grab here" without a permanent visual seam everywhere. */
 .resize-handle {
   position: relative;
-  background: transparent;
+  background: rgb(var(--c-border));
   transition: background 120ms ease;
 }
 .resize-handle:hover,

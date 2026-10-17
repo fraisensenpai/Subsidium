@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { staticFallback } from "../modelCatalog";
-import { AgentChatEntry, AgentMessage, AgentTurnResult, ConversationSummary, ModelSummary, ProviderConfig, ToolLogEntry } from "../types";
+import { staticFallbackFor } from "../modelCatalog";
+import {
+  AgentChatEntry,
+  AgentMessage,
+  AgentTurnResult,
+  ConversationSummary,
+  ModelSummary,
+  ProviderConfig,
+  ToolLogEntry,
+} from "../types";
 import Markdown from "./Markdown";
+import { CheckIcon, CloseIcon, PlusIcon, StripeIcon, WarningIcon, ArrowRightIcon } from "./icons";
 
 // Converts the backend's raw provider-agnostic history (as loaded from a
 // past conversation) into the display entries the panel already knows how
@@ -37,15 +46,22 @@ function transcriptFromMessages(messages: AgentMessage[]): AgentChatEntry[] {
 export default function AgentPanel({
   hasWorkspace,
   onFileWritten,
+  onFilesChanged,
   onUsageChange,
 }: {
   hasWorkspace: boolean;
   onFileWritten: (path: string) => void;
+  /** Called after a privileged action that may have changed files on disk. */
+  onFilesChanged?: () => void;
   onUsageChange?: (used: number, limit: number) => void;
 }) {
   const [entries, setEntries] = useState<AgentChatEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // True between the Stop click and the turn actually coming back — lets the
+  // button say "Stopping…" instead of looking like the click did nothing
+  // while an in-flight provider call / command unwinds.
+  const [stopping, setStopping] = useState(false);
   const [totals, setTotals] = useState<{ input: number; output: number } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -58,6 +74,21 @@ export default function AgentPanel({
   const [modelOptions, setModelOptions] = useState<ModelSummary[]>([]);
   const [switchingModel, setSwitchingModel] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Identifies the in-flight turn's UI "session". Bumped whenever the user
+  // switches context (new conversation, opens another, deletes the active
+  // one) so a turn that's still resolving is dropped instead of being
+  // rendered into the conversation the user has moved to.
+  const turnTokenRef = useRef(0);
+  // Wraps the History button and its dropdown so a click anywhere else
+  // closes the menu (previously it stayed open until the button was hit
+  // again, hovering over the transcript).
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  // While a turn is winding down after Stop, clear the pending flag once it
+  // actually returns.
+  useEffect(() => {
+    if (!busy) setStopping(false);
+  }, [busy]);
 
   useEffect(() => {
     if (!hasWorkspace) return;
@@ -80,7 +111,7 @@ export default function AgentPanel({
     // Start from the curated list so the dropdown always has options even
     // when the provider's models API can't be reached; the live results
     // (with display names) replace it when they arrive.
-    setModelOptions(staticFallback(config.provider));
+    setModelOptions(staticFallbackFor(config));
     try {
       const list = await invoke<ModelSummary[]>("list_models_for_config", { id: config.id });
       if (list.length > 0) setModelOptions(list);
@@ -131,6 +162,16 @@ export default function AgentPanel({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [entries]);
 
+  // Close the History dropdown when the user clicks outside it.
+  useEffect(() => {
+    if (!showHistory) return;
+    function onPointerDown(e: PointerEvent) {
+      if (!historyRef.current?.contains(e.target as Node)) setShowHistory(false);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [showHistory]);
+
   async function toggleHistory() {
     const next = !showHistory;
     setShowHistory(next);
@@ -145,16 +186,23 @@ export default function AgentPanel({
 
   async function openConversation(id: number) {
     setShowHistory(false);
+    // Leaving the current conversation — drop any turn still resolving for
+    // it so its reply can't be appended here.
+    const token = ++turnTokenRef.current;
+    setStopping(false);
     setBusy(true);
     try {
       const messages = await invoke<AgentMessage[]>("load_conversation", { id });
+      if (token !== turnTokenRef.current) return;
       setEntries(transcriptFromMessages(messages));
       setActiveConversationId(id);
       setTotals(null); // historical token usage wasn't stored per message
     } catch (err) {
-      setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      if (token === turnTokenRef.current) {
+        setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      }
     } finally {
-      setBusy(false);
+      if (token === turnTokenRef.current) setBusy(false);
     }
   }
 
@@ -163,6 +211,11 @@ export default function AgentPanel({
     await invoke("delete_conversation", { id });
     setConversations((prev) => prev.filter((c) => c.id !== id));
     if (activeConversationId === id) {
+      // The active conversation is gone — invalidate any turn still running
+      // for it (the backend aborts it too) and show an empty pane.
+      turnTokenRef.current++;
+      setStopping(false);
+      setBusy(false);
       setEntries([]);
       setActiveConversationId(null);
       setTotals(null);
@@ -170,6 +223,9 @@ export default function AgentPanel({
   }
 
   function applyResult(result: AgentTurnResult) {
+    // A turn the backend abandoned because the conversation was replaced —
+    // nothing to render.
+    if (result.status === "aborted") return;
     setTotals({ input: result.total_input_tokens, output: result.total_output_tokens });
     onUsageChange?.(result.tokens_used, result.token_limit);
     if (result.conversation_id !== null) setActiveConversationId(result.conversation_id);
@@ -192,6 +248,14 @@ export default function AgentPanel({
           resolved: null,
         },
       ]);
+    } else if (result.status === "limit_reached" || result.status === "step_limit") {
+      // The turn ended early for a structural reason (token budget spent, or
+      // the step cap hit) rather than the model finishing — render it as a
+      // distinct notice so it doesn't read like a normal reply.
+      setEntries((prev) => [
+        ...prev,
+        { kind: "notice", text: result.text ?? "", toolLog: result.tool_log },
+      ]);
     } else {
       setEntries((prev) => [
         ...prev,
@@ -209,9 +273,12 @@ export default function AgentPanel({
     }
   }
 
-  // Requests the running agent turn to stop — the loop checks the flag
-  // between steps and reports back as a normal ("stopped") result.
+  // Requests the running agent turn to stop — the loop checks the flag right
+  // after the in-flight provider call returns, and any command running in the
+  // Terminal panel is killed immediately.
   async function stopAgent() {
+    if (stopping) return;
+    setStopping(true);
     await invoke("agent_stop").catch(() => {});
   }
 
@@ -220,14 +287,17 @@ export default function AgentPanel({
     if (!text || busy || !hasWorkspace) return;
     setInput("");
     setEntries((prev) => [...prev, { kind: "user", text }]);
+    const token = ++turnTokenRef.current;
     setBusy(true);
     try {
       const result = await invoke<AgentTurnResult>("agent_send_message", { text });
-      applyResult(result);
+      if (token === turnTokenRef.current) applyResult(result);
     } catch (err) {
-      setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      if (token === turnTokenRef.current) {
+        setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      }
     } finally {
-      setBusy(false);
+      if (token === turnTokenRef.current) setBusy(false);
     }
   }
 
@@ -235,39 +305,67 @@ export default function AgentPanel({
     setEntries((prev) =>
       prev.map((e, i) => (i === index && e.kind === "approval" ? { ...e, resolved: approved ? "approved" : "denied" } : e))
     );
+    const approvedTool =
+      approved && entries[index]?.kind === "approval"
+        ? (entries[index] as Extract<AgentChatEntry, { kind: "approval" }>).tool
+        : null;
+    const token = ++turnTokenRef.current;
     setBusy(true);
     try {
       const result = await invoke<AgentTurnResult>("agent_respond_to_approval", { approved });
-      if (approved && entries[index]?.kind === "approval") {
-        const tool = (entries[index] as Extract<AgentChatEntry, { kind: "approval" }>).tool;
-        if (tool.name === "write_file" && typeof tool.arguments === "object" && tool.arguments) {
-          const path = (tool.arguments as { path?: string }).path;
+      // Disk side effects are real regardless of which conversation is now
+      // showing, so refresh the editor/Explorer before the staleness guard.
+      if (approvedTool) {
+        if (
+          approvedTool.name === "write_file" &&
+          typeof approvedTool.arguments === "object" &&
+          approvedTool.arguments
+        ) {
+          const path = (approvedTool.arguments as { path?: string }).path;
           if (path) onFileWritten(path);
         }
+        // A privileged action can add or change files on disk — a
+        // run_command (a script that writes a file, for instance) just as
+        // much as a write_file — so rescan the Explorer either way.
+        onFilesChanged?.();
       }
+      if (token !== turnTokenRef.current) return;
       applyResult(result);
     } catch (err) {
-      setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      if (token === turnTokenRef.current) {
+        setEntries((prev) => [...prev, { kind: "error", text: String(err) }]);
+      }
     } finally {
-      setBusy(false);
+      if (token === turnTokenRef.current) setBusy(false);
     }
   }
 
   async function startNew() {
-    await invoke("agent_reset");
+    // Invalidate the in-flight turn first — its reply must not land in the
+    // new conversation (the backend aborts it too).
+    const token = ++turnTokenRef.current;
+    setStopping(false);
+    setShowHistory(false);
     setEntries([]);
     setTotals(null);
     setActiveConversationId(null);
-    setShowHistory(false);
+    setBusy(true);
+    try {
+      await invoke("agent_reset");
+    } catch {
+      // ignore
+    } finally {
+      if (token === turnTokenRef.current) setBusy(false);
+    }
   }
 
   return (
     <div className="h-full flex flex-col min-h-0 relative">
-      <div className="flex items-center justify-between px-3 h-9 border-b border-border shrink-0">
+      <div className="flex items-center justify-between px-3 h-10 border-b border-border shrink-0 gap-2">
         <div className="min-w-0 flex items-center gap-1.5">
           {providerConfig && (
             <>
-              <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent text-[11px] font-medium truncate shrink-0">
+              <span className="px-1.5 py-0.5 rounded-md bg-accent/10 text-accent text-[11px] font-medium truncate shrink-0 max-w-[110px]">
                 {providerLabel}
               </span>
               <select
@@ -275,7 +373,7 @@ export default function AgentPanel({
                 onChange={(e) => switchModel(e.target.value)}
                 disabled={busy || switchingModel}
                 title="Switch model — takes effect on the next message"
-                className="max-w-[150px] bg-panel border border-border rounded px-1.5 py-0.5 text-[11px] font-mono text-muted hover:text-ink outline-none focus:border-accent-dim disabled:opacity-50 transition shrink-0"
+                className="max-w-[150px] bg-panel2 border border-border rounded-md px-1.5 py-0.5 text-[11px] font-mono text-ink/80 hover:border-border-strong outline-none focus:border-accent-dim disabled:opacity-50 transition shrink-0"
               >
                 {modelOptionsFor().map((m) => (
                   <option key={m.id} value={m.id}>
@@ -288,58 +386,59 @@ export default function AgentPanel({
           <span className="text-muted text-[11px] truncate">
             {totals
               ? `${totals.input.toLocaleString("en-US")} in · ${totals.output.toLocaleString("en-US")} out`
-              : "No messages yet"}
+              : ""}
           </span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div ref={historyRef} className="relative flex items-center gap-1 shrink-0">
           <button
             onClick={toggleHistory}
-            className="px-2 h-6 rounded border border-border text-[11px] text-muted hover:text-ink hover:border-accent-dim transition"
+            className="px-2 h-6 rounded-md border border-border text-[11px] text-muted hover:text-ink hover:border-border-strong transition"
           >
             History
           </button>
           <button
             onClick={startNew}
-            className="px-2 h-6 rounded border border-border text-[11px] text-muted hover:text-ink hover:border-accent-dim transition"
+            title="New conversation"
+            className="w-6 h-6 rounded-md border border-border text-muted hover:text-ink hover:border-border-strong transition flex items-center justify-center"
           >
-            New
+            <PlusIcon size={13} />
           </button>
+
+          {showHistory && (
+            <div className="absolute right-0 top-9 z-20 w-64 max-h-72 overflow-y-auto bg-panel border border-border rounded-lg elev-2 fade-in">
+              {conversations.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-muted">No past conversations yet.</div>
+              ) : (
+                conversations.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={() => openConversation(c.id)}
+                    className={`px-3 py-2 text-xs cursor-pointer border-b border-border/60 last:border-b-0 hover:bg-panel2 flex items-center justify-between gap-2 ${
+                      activeConversationId === c.id ? "bg-panel2" : ""
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-ink/90">{c.title}</div>
+                      <div className="text-muted/70 text-[10px]">{c.updated_at}</div>
+                    </div>
+                    <button
+                      onClick={(e) => removeConversation(c.id, e)}
+                      className="text-muted hover:text-bad shrink-0 transition"
+                      title="Delete"
+                    >
+                      <CloseIcon size={12} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
 
-      {showHistory && (
-        <div className="absolute right-2 top-9 z-10 w-64 max-h-72 overflow-y-auto bg-panel2 border border-border rounded-md shadow-lg">
-          {conversations.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-muted">No past conversations yet.</div>
-          ) : (
-            conversations.map((c) => (
-              <div
-                key={c.id}
-                onClick={() => openConversation(c.id)}
-                className={`px-3 py-2 text-xs cursor-pointer border-b border-border/60 last:border-b-0 hover:bg-panel flex items-center justify-between gap-2 ${
-                  activeConversationId === c.id ? "bg-panel" : ""
-                }`}
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-ink/90">{c.title}</div>
-                  <div className="text-muted/70 text-[10px]">{c.updated_at}</div>
-                </div>
-                <button
-                  onClick={(e) => removeConversation(c.id, e)}
-                  className="text-muted hover:text-bad shrink-0"
-                  title="Delete"
-                >
-                  ✕
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 px-3 py-3 space-y-2.5 chat-scroll">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 px-3 py-3 space-y-3 chat-scroll">
         {entries.length === 0 && (
-          <div className="text-sm text-muted text-center mt-8 px-6 leading-relaxed">
+          <div className="text-sm text-muted text-center mt-10 px-6 leading-relaxed">
             {hasWorkspace
               ? "Ask the agent to explain, find, or change something in this workspace."
               : "Select a workspace first."}
@@ -347,18 +446,14 @@ export default function AgentPanel({
         )}
 
         {entries.map((entry, i) => (
-          <div
-            key={i}
-            className="msg-in"
-            style={{ animationDelay: `${Math.min(i, 5) * 25}ms` }}
-          >
+          <div key={i} className="msg-in" style={{ animationDelay: `${Math.min(i, 5) * 25}ms` }}>
             <ChatEntry entry={entry} onRespond={(approved) => respond(i, approved)} />
           </div>
         ))}
 
         {busy && (
           <div className="flex items-center px-1">
-            <div className="flex items-center gap-1.5 text-xs text-muted px-2.5 py-1.5 rounded-full bg-panel border border-border">
+            <div className="flex items-center gap-1.5 text-xs text-muted px-2.5 py-1.5 rounded-full bg-panel border border-border elev-1">
               Working
               <span className="dot" />
               <span className="dot" />
@@ -374,25 +469,24 @@ export default function AgentPanel({
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
           disabled={!hasWorkspace || busy}
-          placeholder={
-            hasWorkspace ? "Message the agent…" : "Select a workspace to chat"
-          }
-          className="flex-1 bg-panel border border-border rounded-lg px-3 py-2 text-sm outline-none placeholder:text-muted/60 focus:border-accent-dim disabled:opacity-50 transition"
+          placeholder={hasWorkspace ? "Message the agent…" : "Select a workspace to chat"}
+          className="flex-1 bg-panel2 border border-border rounded-lg px-3 py-2 text-sm outline-none placeholder:text-muted/60 focus:border-accent-dim disabled:opacity-50 transition"
         />
         {busy ? (
           <button
             onClick={stopAgent}
-            className="h-[34px] px-4 rounded-lg bg-bad/15 text-bad border border-bad/30 text-sm font-medium hover:bg-bad/25 transition shrink-0 flex items-center gap-1.5"
+            disabled={stopping}
+            className="h-[34px] px-4 rounded-lg bg-bad/10 text-bad border border-bad/30 text-sm font-medium hover:bg-bad/20 transition shrink-0 flex items-center gap-1.5 disabled:opacity-60"
             title="Stop the agent"
           >
-            <SquareGlyph />
-            Stop
+            <StripeIcon size={9} />
+            {stopping ? "Stopping…" : "Stop"}
           </button>
         ) : (
           <button
             onClick={send}
             disabled={!hasWorkspace || !input.trim()}
-            className="h-[34px] px-4 rounded-lg bg-accent text-base text-sm font-medium disabled:opacity-35 hover:brightness-110 transition shrink-0"
+            className="h-[34px] px-4 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-35 hover:brightness-110 transition shrink-0"
           >
             Send
           </button>
@@ -405,7 +499,7 @@ export default function AgentPanel({
 function DiffView({ diff }: { diff: string }) {
   const lines = diff.split("\n").filter((_, i, arr) => !(i === arr.length - 1 && arr[i] === ""));
   return (
-    <div className="max-h-56 overflow-y-auto bg-base border border-border rounded-md text-[11px] font-mono">
+    <div className="max-h-56 overflow-y-auto bg-sunken border border-border rounded-md text-[11px] font-mono">
       {lines.map((line, i) => {
         const isAdd = line.startsWith("+");
         const isDel = line.startsWith("-");
@@ -432,10 +526,11 @@ function ThinkingBlock({ text }: { text: string }) {
         onClick={() => setOpen((o) => !o)}
         className="text-[11px] text-muted hover:text-ink italic flex items-center gap-1"
       >
-        <span>{open ? "▾" : "▸"}</span> thinking…
+        <span className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>›</span>
+        thinking
       </button>
       {open && (
-        <div className="mt-1 border-l-2 border-border pl-2 text-[11px] text-muted italic whitespace-pre-wrap">
+        <div className="mt-1 border-l-2 border-border pl-2.5 text-[11px] text-muted italic whitespace-pre-wrap">
           {text}
         </div>
       )}
@@ -443,11 +538,39 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
+function ToolChips({ logs }: { logs: ToolLogEntry[] }) {
+  if (logs.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {logs.map((t, i) => (
+        <span
+          key={i}
+          title={t.result_preview}
+          className="chip-in text-[10px] px-1.5 py-0.5 rounded-md bg-panel2 border border-border text-muted font-mono inline-flex items-center gap-1"
+          style={{ animationDelay: `${i * 40}ms` }}
+        >
+          <ArrowRightIcon size={9} className="text-accent/70" />
+          {t.tool_name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function AgentMark() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="1" y="1" width="22" height="22" rx="7" fill="rgb(var(--c-accent) / 0.12)" />
+      <path d="M12 6.5 16.8 9.4v5.2L12 17.5 7.2 14.6V9.4z" fill="rgb(var(--c-accent) / 0.9)" />
+    </svg>
+  );
+}
+
 function ChatEntry({ entry, onRespond }: { entry: AgentChatEntry; onRespond: (approved: boolean) => void }) {
   if (entry.kind === "user") {
     return (
       <div className="flex justify-end gap-2">
-        <div className="max-w-[85%] bg-brand text-white rounded-2xl rounded-br-md px-4 py-2 text-sm whitespace-pre-wrap leading-relaxed shadow-[0_1px_3px_rgba(0,0,0,0.18)]">
+        <div className="max-w-[85%] bg-accent/10 border border-accent/20 text-ink rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap leading-relaxed">
           {entry.text}
         </div>
       </div>
@@ -457,27 +580,14 @@ function ChatEntry({ entry, onRespond }: { entry: AgentChatEntry; onRespond: (ap
   if (entry.kind === "assistant") {
     return (
       <div className="flex gap-2">
-        <div className="w-6 h-6 mt-0.5 rounded-lg bg-panel2 border border-border flex items-center justify-center shrink-0 shadow-sm">
-          <SparkGlyph />
+        <div className="shrink-0 mt-0.5">
+          <AgentMark />
         </div>
         <div className="space-y-1.5 min-w-0 flex-1">
-          {entry.toolLog.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {entry.toolLog.map((t, i) => (
-                <span
-                  key={i}
-                  title={t.result_preview}
-                  className="chip-in text-[10px] px-1.5 py-0.5 rounded bg-panel border border-border text-muted font-mono"
-                  style={{ animationDelay: `${i * 40}ms` }}
-                >
-                  ⇢ {t.tool_name}
-                </span>
-              ))}
-            </div>
-          )}
+          <ToolChips logs={entry.toolLog} />
           {entry.thinking && <ThinkingBlock text={entry.thinking} />}
           {entry.text && (
-            <div className="bg-panel border border-border rounded-2xl rounded-tl-md px-4 py-2.5 text-sm shadow-sm overflow-x-auto">
+            <div className="bg-panel border border-border rounded-2xl rounded-tl-md px-3.5 py-2.5 text-sm elev-1 overflow-x-auto">
               <Markdown text={entry.text} />
             </div>
           )}
@@ -486,25 +596,43 @@ function ChatEntry({ entry, onRespond }: { entry: AgentChatEntry; onRespond: (ap
     );
   }
 
+  if (entry.kind === "notice") {
+    return (
+      <div className="flex gap-2">
+        <div className="w-6 h-6 mt-0.5 rounded-md bg-warn/10 border border-warn/20 flex items-center justify-center shrink-0 text-warn">
+          <WarningIcon size={13} />
+        </div>
+        <div className="space-y-1.5 min-w-0 flex-1">
+          <ToolChips logs={entry.toolLog} />
+          <div className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-lg px-3 py-2">
+            {entry.text}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (entry.kind === "error") {
     return (
       <div className="flex gap-2">
-        <div className="w-6 h-6 mt-0.5 rounded-md bg-panel2 border border-border flex items-center justify-center shrink-0">
-          <ErrorGlyph />
+        <div className="w-6 h-6 mt-0.5 rounded-md bg-bad/10 border border-bad/20 flex items-center justify-center shrink-0 text-bad">
+          <WarningIcon size={13} />
         </div>
-        <div className="text-xs text-bad bg-bad/10 border border-bad/15 rounded-lg px-3 py-2 flex-1">{entry.text}</div>
+        <div className="text-xs text-bad bg-bad/10 border border-bad/15 rounded-lg px-3 py-2 flex-1">
+          {entry.text}
+        </div>
       </div>
     );
   }
 
   // approval card
   return (
-    <div className="ml-8 border border-accent-dim/50 bg-accent/[0.05] rounded-lg px-3.5 py-3 space-y-2.5">
+    <div className="ml-8 border border-accent/30 bg-accent/[0.04] rounded-xl px-3.5 py-3 space-y-2.5">
       <div className="flex items-center gap-1.5 text-xs text-accent font-medium">
-        <ShieldGlyph />
+        <span className="w-1.5 h-1.5 rounded-full bg-accent" />
         Approval needed
       </div>
-      <div className="text-sm font-mono text-ink/90 bg-base/60 border border-border/60 rounded-md px-2.5 py-1.5">
+      <div className="text-[13px] font-mono text-ink/90 bg-sunken border border-border rounded-md px-2.5 py-1.5">
         {entry.description}
       </div>
       {entry.diff && <DiffView diff={entry.diff} />}
@@ -512,13 +640,13 @@ function ChatEntry({ entry, onRespond }: { entry: AgentChatEntry; onRespond: (ap
         <div className="flex gap-2">
           <button
             onClick={() => onRespond(true)}
-            className="px-3 h-7 rounded-md bg-accent text-base text-xs font-medium hover:brightness-110 transition"
+            className="px-3 h-7 rounded-md bg-accent text-white text-xs font-medium hover:brightness-110 transition"
           >
             Approve
           </button>
           <button
             onClick={() => onRespond(false)}
-            className="px-3 h-7 rounded-md border border-border text-xs text-muted hover:text-ink hover:border-accent-dim transition"
+            className="px-3 h-7 rounded-md border border-border text-xs text-muted hover:text-ink hover:border-border-strong transition"
           >
             Deny
           </button>
@@ -531,67 +659,15 @@ function ChatEntry({ entry, onRespond }: { entry: AgentChatEntry; onRespond: (ap
         >
           {entry.resolved === "approved" ? (
             <>
-              <CheckGlyph /> Approved — running in the terminal / applied
+              <CheckIcon size={12} /> Approved — running in the terminal / applied
             </>
           ) : (
             <>
-              <XGlyph /> Denied
+              <CloseIcon size={12} /> Denied
             </>
           )}
         </div>
       )}
     </div>
-  );
-}
-
-// ── Tiny glyphs for chat chrome ──────────────────────────────────────
-function SparkGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
-      <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
-    </svg>
-  );
-}
-
-function ShieldGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-    </svg>
-  );
-}
-
-function CheckGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-function XGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  );
-}
-
-function ErrorGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-bad">
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="8" x2="12" y2="12" />
-      <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  );
-}
-
-function SquareGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-      <rect x="5" y="5" width="14" height="14" rx="2" />
-    </svg>
   );
 }

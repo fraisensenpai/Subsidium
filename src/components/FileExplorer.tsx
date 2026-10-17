@@ -1,5 +1,21 @@
 import { useState } from "react";
 import { FileNode } from "../types";
+import { ChevronRight, FileIcon, FolderIcon } from "./icons";
+
+// A muted, distinct hue per language so files are scannable at a glance
+// without turning the tree into a rainbow.
+const LANG_COLOR: Record<string, string> = {
+  typescript: "#3b82f6",
+  tsx: "#3b82f6",
+  javascript: "#eab308",
+  jsx: "#eab308",
+  python: "#3572a5",
+  rust: "#d08770",
+  css: "#8b5cf6",
+  html: "#e34c26",
+  json: "#a3a3a3",
+  markdown: "#6b7280",
+};
 
 function Node({
   node,
@@ -16,30 +32,23 @@ function Node({
 
   if (!node.is_dir) {
     const isSelected = node.path === selectedPath;
+    const dot = node.language ? LANG_COLOR[node.language] : undefined;
     return (
       <div
         onClick={() => onSelect(node.path)}
         title={node.path}
-        className={`flex items-center gap-1.5 py-[3px] text-sm cursor-pointer group ${
-          isSelected
-            ? "bg-accent/12 text-ink shadow-[inset_2px_0_0_0_rgb(var(--c-accent))]"
-            : "text-muted hover:text-ink hover:bg-panel2/40"
+        className={`relative flex items-center gap-1.5 py-[3px] pr-2 text-[13px] cursor-pointer group ${
+          isSelected ? "bg-accent/10 text-ink" : "text-ink/75 hover:text-ink hover:bg-panel2/70"
         }`}
-        style={{ paddingLeft: depth * 14 + 8 }}
+        style={{ paddingLeft: depth * 13 + 8 }}
       >
-        <span
-          className={`w-3.5 text-center text-xs shrink-0 ${
-            isSelected ? "text-accent opacity-100" : "opacity-40 group-hover:opacity-70"
-          }`}
-        >
-          {isSelected ? "●" : "•"}
-        </span>
+        {isSelected && <span className="absolute left-0 top-0 bottom-0 w-[2px] bg-accent" />}
+        <FileIcon
+          size={14}
+          className="shrink-0"
+          style={{ color: dot ?? "rgb(var(--c-muted))" }}
+        />
         <span className="truncate">{node.name}</span>
-        {node.language && (
-          <span className="ml-auto text-[10px] uppercase tracking-wide text-muted/50 pr-2 shrink-0">
-            {node.language}
-          </span>
-        )}
       </div>
     );
   }
@@ -47,12 +56,16 @@ function Node({
   return (
     <div>
       <div
-        className="flex items-center gap-1.5 py-0.5 text-sm text-ink/90 cursor-pointer select-none"
-        style={{ paddingLeft: depth * 14 + 8 }}
+        className="flex items-center gap-0.5 py-[3px] pr-2 text-[13px] text-ink/85 cursor-pointer select-none hover:bg-panel2/70 rounded-sm"
+        style={{ paddingLeft: depth * 13 + 4 }}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="w-3.5 text-center text-xs">{open ? "▾" : "▸"}</span>
-        <span className="font-medium">{node.name}</span>
+        <ChevronRight
+          size={13}
+          className={`shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <FolderIcon size={14} className="shrink-0 text-muted/90" />
+        <span className="font-medium truncate ml-0.5">{node.name}</span>
       </div>
       {open && node.children && (
         <div>
@@ -82,16 +95,16 @@ export default function FileExplorer({
 }) {
   if (!tree) {
     return (
-      <div className="text-sm text-muted p-4">
-        No workspace loaded yet. Select a folder to begin.
+      <div className="p-4 text-sm text-muted leading-relaxed">
+        No workspace open. Use <span className="text-ink/80 font-medium">Select Workspace</span> to
+        open a folder.
       </div>
     );
   }
 
   return (
-    <div className="overflow-y-auto h-full py-2">
+    <div className="overflow-y-auto h-full py-1.5">
       <Node node={tree} depth={0} onSelect={onSelect} selectedPath={selectedPath} />
     </div>
   );
 }
-

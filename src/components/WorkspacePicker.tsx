@@ -1,15 +1,25 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { FileNode, ScanSummary, IndexStats } from "../types";
+import { FolderIcon } from "./icons";
 
 interface Props {
   onWorkspaceLoaded: (root: string, tree: FileNode, summary: ScanSummary, stats: IndexStats) => void;
   onStart: () => void;
+  /** Returns false to abort the switch — e.g. the user declined to discard
+   *  unsaved editor changes after picking a folder. */
+  onConfirmSwitch?: () => boolean;
   onError: (message: string) => void;
   busy: boolean;
 }
 
-export default function WorkspacePicker({ onWorkspaceLoaded, onStart, onError, busy }: Props) {
+export default function WorkspacePicker({
+  onWorkspaceLoaded,
+  onStart,
+  onConfirmSwitch,
+  onError,
+  busy,
+}: Props) {
   async function pickWorkspace() {
     const selected = await open({
       directory: true,
@@ -18,6 +28,9 @@ export default function WorkspacePicker({ onWorkspaceLoaded, onStart, onError, b
     });
 
     if (!selected || Array.isArray(selected)) return;
+
+    // Confirm *before* doing any work, so a declined switch is a clean no-op.
+    if (onConfirmSwitch && !onConfirmSwitch()) return;
 
     onStart();
     try {
@@ -37,8 +50,9 @@ export default function WorkspacePicker({ onWorkspaceLoaded, onStart, onError, b
     <button
       onClick={pickWorkspace}
       disabled={busy}
-      className="px-4 py-2 rounded-md bg-accent text-base font-medium text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition"
+      className="h-8 px-3.5 rounded-md bg-accent text-white font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition flex items-center gap-1.5"
     >
+      <FolderIcon size={13} />
       {busy ? "Indexing…" : "Select Workspace"}
     </button>
   );

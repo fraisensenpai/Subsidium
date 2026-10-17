@@ -55,6 +55,10 @@ export interface ProviderConfig {
   provider: "anthropic" | "gemini" | "openai_compatible" | "ollama";
   base_url: string | null;
   model: string;
+  // Catalog preset (brand) this account was created from, e.g. "groq",
+  // "openrouter", "lmstudio". Purely descriptive — the backend doesn't read
+  // it, but the UI uses it to preselect the right preset and model list.
+  preset?: string | null;
 }
 
 export interface AiResponse {
@@ -82,7 +86,7 @@ export interface ToolLogEntry {
 }
 
 export interface AgentTurnResult {
-  status: "final" | "pending_approval" | "stopped";
+  status: "final" | "pending_approval" | "stopped" | "aborted" | "limit_reached" | "step_limit";
   text: string | null;
   thinking: string | null;
   pending_tool: ToolCall | null;
@@ -105,6 +109,10 @@ export interface AppSettings {
   token_limit: number;
   tokens_used: number;
   usage_by_model: ModelUsageRecord[];
+  // Hours between automatic usage resets (0 = never).
+  reset_interval_hours: number;
+  // Unix timestamp (seconds) of the last reset; 0 when not started yet.
+  last_reset_at: number;
 }
 
 // Mirrors src-tauri/src/settings.rs ModelUsageRecord.
@@ -137,4 +145,5 @@ export type AgentChatEntry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; thinking: string | null; toolLog: ToolLogEntry[] }
   | { kind: "approval"; tool: ToolCall; description: string; diff: string | null; resolved: "approved" | "denied" | null }
+  | { kind: "notice"; text: string; toolLog: ToolLogEntry[] }
   | { kind: "error"; text: string };
