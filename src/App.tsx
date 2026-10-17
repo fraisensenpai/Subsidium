@@ -13,6 +13,7 @@ import TerminalPanel from "./components/TerminalPanel";
 import OnboardingScreen from "./components/OnboardingScreen";
 import ThemeToggle, { useTheme } from "./components/ThemeToggle";
 import { AppSettings, FileNode, ProviderConfig, WorkspaceState } from "./types";
+import crescendoLogo from "../assets/crescendo.png";
 import {
   ChatIcon,
   FolderIcon,
@@ -129,6 +130,13 @@ export default function App() {
               </span>
             </div>
           )}
+          <div
+            className="flex items-center gap-1.5 pl-3 border-l border-border shrink-0"
+            title="Subsidium is made by Crescendo Technologies"
+          >
+            <img src={crescendoLogo} alt="" className="w-3.5 h-3.5 rounded-[3px]" />
+            <span className="text-[11px] text-muted whitespace-nowrap">by Crescendo Technologies</span>
+          </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <ThemeToggle theme={theme} onToggle={toggleTheme} />

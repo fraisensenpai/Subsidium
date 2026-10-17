@@ -4,6 +4,7 @@ import ProviderConfigForm from "./ProviderConfigForm";
 import { ProviderConfig } from "../types";
 import { presetForConfig } from "../providerPresets";
 import { ArrowRightIcon, CheckIcon } from "./icons";
+import crescendoLogo from "../../assets/crescendo.png";
 
 export default function OnboardingScreen({ onDone }: { onDone: () => void }) {
   const [configs, setConfigs] = useState<ProviderConfig[]>([]);
@@ -54,9 +55,15 @@ export default function OnboardingScreen({ onDone }: { onDone: () => void }) {
           </ul>
         </div>
 
-        <p className="text-[11px] text-muted/70">
-          Your API keys are stored in the operating system keychain.
-        </p>
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5 text-[11px] text-muted/70">
+            <img src={crescendoLogo} alt="" className="w-3.5 h-3.5 rounded-[3px]" />
+            <span>Made by Crescendo Technologies</span>
+          </div>
+          <p className="text-[11px] text-muted/70">
+            Your API keys are stored in the operating system keychain.
+          </p>
+        </div>
       </div>
 
       {/* Right: setup */}

@@ -15,6 +15,11 @@
   <img alt="Built with" src="https://img.shields.io/badge/Tauri%202%20%C2%B7%20Rust%20%C2%B7%20React%20%C2%B7%20TypeScript-52B482?style=flat-square&labelColor=11140F">
 </p>
 
+<p>
+  <img src="assets/crescendo.png" alt="Crescendo Technologies" width="16" height="16">
+  &nbsp;Made by <b>Crescendo Technologies</b>
+</p>
+
 </div>
 
 <br>
@@ -343,7 +348,11 @@ MIT — see [LICENSE](LICENSE).
 
 <div align="center">
 
+<img src="assets/crescendo.png" alt="Crescendo Technologies" width="28" height="28">
+
 **Subsidium**
+
+Made by **Crescendo Technologies**
 
 Built with Rust, React and a lot of iteration.
 
