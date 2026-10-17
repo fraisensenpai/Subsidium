@@ -1,6 +1,6 @@
 [package]
 name = "subsidium"
-version = "0.1.0"
+version = "0.1.1"
 description = "Subsidium — local workspace-intelligence coding agent (Phase 1 skeleton)"
 edition = "2021"
 
