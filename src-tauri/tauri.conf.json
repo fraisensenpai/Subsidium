@@ -26,6 +26,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "shortDescription": "Local workspace-intelligence coding agent",
+    "longDescription": "Subsidium is a desktop coding environment built around your workspace: file explorer, editor, terminal, search, Git information and an approval-gated AI agent in one place.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
