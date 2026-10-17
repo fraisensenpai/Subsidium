@@ -1,10 +1,10 @@
 {
   "name": "subsidium",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local workspace-intelligence coding agent — file explorer, editor, terminal, search and an approval-gated AI agent in one desktop app.",
   "license": "MIT",
-  "author": "fraisensenpai",
+  "author": "Crescendo Technologies",
   "repository": {
     "type": "git",
     "url": "https://github.com/fraisensenpai/Subsidium.git"

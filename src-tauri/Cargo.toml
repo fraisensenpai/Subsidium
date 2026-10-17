@@ -1,7 +1,8 @@
 [package]
 name = "subsidium"
-version = "0.1.3"
+version = "0.1.4"
 description = "A local workspace-intelligence coding agent for your projects"
+authors = ["Crescendo Technologies"]
 edition = "2021"
 
 [lib]
