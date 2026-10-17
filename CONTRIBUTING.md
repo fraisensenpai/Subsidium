@@ -38,7 +38,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 ## Project layout
 
 ```text
-assets/                  screenshot, and app-icon.svg — the icon source
+assets/                  app-icon.svg — the source for the app icon
 src/                     React + TypeScript frontend
   components/            one file per panel (Agent, Terminal, Editor, …)
   providerPresets.ts     the AI provider brand catalog
