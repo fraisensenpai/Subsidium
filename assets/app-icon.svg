@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Source artwork for the Subsidium app icon.
+
+    The mark is the same one drawn by the in-app <Logo /> component
+    (src/App.tsx, src/components/OnboardingScreen.tsx): a hexagon outline
+    around a solid diamond with a stem. Here it is placed on the brand's
+    deep pine-green background and coloured with the bright brand green used
+    by the dark theme.
+
+    Regenerate the platform icons after editing this file:
+
+      npm run tauri icon assets/app-icon.svg
+  -->
+  <rect x="12" y="12" width="1000" height="1000" rx="180" fill="#17493A"/>
+  <g transform="translate(106.4 106.4) scale(33.8)">
+    <path
+      d="M12 2.6 20.4 7.3v9.4L12 21.4 3.6 16.7V7.3z"
+      fill="#52B482"
+      fill-opacity="0.16"
+      stroke="#52B482"
+      stroke-width="1.7"
+      stroke-linejoin="round"
+    />
+    <path d="M12 7.4 16.4 10 12 12.6 7.6 10z" fill="#52B482"/>
+    <path d="M12 12.6v4.2" stroke="#52B482" stroke-width="1.7" stroke-linecap="round"/>
+  </g>
+</svg>
