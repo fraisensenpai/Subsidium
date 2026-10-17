@@ -10,7 +10,12 @@ pub struct ExtractedSymbol {
     pub end_line: usize,   // 1-based, inclusive
 }
 
+/// The kinds of symbol a parser can report. `Const` and `Module` are part of
+/// the vocabulary but not emitted by any query yet — they're kept so adding a
+/// language that has them (Go's `const`, Python modules, …) is a query change,
+/// not an enum change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SymbolKind {
     Function,
     Method,

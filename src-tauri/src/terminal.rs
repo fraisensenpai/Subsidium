@@ -569,18 +569,55 @@ fn truncate_output(s: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Verifies that a process spawned through the PTY actually starts in
-    /// the requested working directory — the mechanism the "terminal opens
-    /// in the workspace folder" behavior relies on. Runs the platform
-    /// shell's `cd` (with no arguments it prints the current directory)
-    /// and checks the output contains the directory we asked for.
-    /// Verifies that the interactive shell actually lands in the requested
-    /// directory (via the startup `cd` on Windows) and accepts input — the
-    /// full "terminal opens in the workspace folder" behavior, headless.
+    /// Creates the throwaway directory a test runs its shell in.
+    fn probe_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// What to look for in the PTY transcript. Only the directory *name* is
+    /// matched, not the full path: the platforms disagree about separators,
+    /// case, and whether the temp dir is a symlink (`/tmp` vs
+    /// `/private/tmp` on macOS), and none of that is what these tests are
+    /// about. Lowercased because cmd.exe output is case-insensitive.
+    fn needle(dir: &std::path::Path) -> String {
+        dir.file_name()
+            .expect("probe dir has a name")
+            .to_string_lossy()
+            .to_lowercase()
+    }
+
+    /// Reads the PTY transcript until EOF, but never blocks forever: the read
+    /// runs on its own thread and we only wait a bounded time for it. A shell
+    /// that lingers (or a grandchild that inherited the pty) must not be able
+    /// to hang the whole test run -- Windows ConPTY in particular does not
+    /// always deliver EOF once the child exits.
+    fn read_bounded(
+        mut reader: Box<dyn std::io::Read + Send>,
+        budget: std::time::Duration,
+    ) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            let _ = tx.send(out);
+        });
+        rx.recv_timeout(budget).unwrap_or_default()
+    }
+
+    /// Verifies the full "terminal opens in the workspace folder" behavior,
+    /// headless: the interactive shell starts in the requested directory and
+    /// accepts typed input.
     #[test]
     fn interactive_shell_opens_in_cwd_and_accepts_input() {
-        let target = std::env::temp_dir().join("subsidium-shell-test");
-        std::fs::create_dir_all(&target).unwrap();
+        let target = probe_dir("subsidium-shell-test");
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -603,11 +640,14 @@ mod tests {
         drop(slave);
 
         let mut writer = master.take_writer().unwrap();
-        let mut reader = master.try_clone_reader().unwrap();
+        let reader = master.try_clone_reader().unwrap();
 
         // Ask the shell where it is, then close it. `%CD%` is cmd.exe's
-        // current-directory variable; the prompt would show the same path.
+        // current-directory variable; `$(pwd)` is the POSIX equivalent.
+        #[cfg(target_os = "windows")]
         let _ = writer.write_all(b"echo [CWD]%CD%\r\nexit\r");
+        #[cfg(not(target_os = "windows"))]
+        let _ = writer.write_all(b"echo [CWD]$(pwd)\nexit\n");
         let _ = writer.flush();
 
         // Wait for the shell to exit (bounded), then close our write end
@@ -620,26 +660,23 @@ mod tests {
         let _ = child.wait();
         drop(writer);
 
-        let mut out = String::new();
-        let _ = reader.read_to_string(&mut out);
+        let out = read_bounded(reader, std::time::Duration::from_secs(5));
 
-        let expected = target.to_string_lossy().to_lowercase().replace('/', "\\");
+        let expected = needle(&target);
         let actual = out.to_lowercase();
         assert!(
             actual.contains(&expected),
-            "shell did not open in target dir:\n  expected: {expected}\n  got: {actual}"
+            "shell did not open in {expected}:\n{actual}"
         );
     }
 
     /// Verifies that a process spawned through the PTY actually starts in
-    /// the requested working directory — the mechanism the "terminal opens
-    /// in the workspace folder" behavior relies on. Runs the platform
-    /// shell's `cd` (with no arguments it prints the current directory)
-    /// and checks the output contains the directory we asked for.
+    /// the requested working directory — the mechanism behind "the terminal
+    /// opens in the workspace folder". `cmd /C cd` prints cmd's current
+    /// directory; `sh -c pwd` is the POSIX equivalent.
     #[test]
     fn pty_respects_cwd() {
-        let target = std::env::temp_dir().join("subsidium-cwd-test");
-        std::fs::create_dir_all(&target).unwrap();
+        let target = probe_dir("subsidium-cwd-test");
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -652,29 +689,33 @@ mod tests {
             .expect("openpty");
         let (master, slave) = (pair.master, pair.slave);
 
+        #[cfg(target_os = "windows")]
+        let script = "cd";
+        #[cfg(not(target_os = "windows"))]
+        let script = "pwd";
+
         let (shell, flag) = command_shell();
         let mut cmd = CommandBuilder::new(shell);
         cmd.arg(flag);
-        cmd.arg("cd");
+        cmd.arg(script);
         cmd.cwd(&target);
         let mut child = slave.spawn_command(cmd).expect("spawn");
         drop(slave);
 
         // Wait for the process to finish, then close our copy of the pty's
         // write end so the reader sees EOF and we can collect the output.
-        let mut writer = master.take_writer().expect("take_writer");
-        let mut reader = master.try_clone_reader().expect("reader");
+        let writer = master.take_writer().expect("take_writer");
+        let reader = master.try_clone_reader().expect("reader");
         let _ = child.wait();
         drop(writer);
 
-        let mut out = String::new();
-        reader.read_to_string(&mut out).expect("read");
+        let out = read_bounded(reader, std::time::Duration::from_secs(5));
 
-        let expected = target.to_string_lossy().to_lowercase().replace('/', "\\");
+        let expected = needle(&target);
         let actual = out.to_lowercase();
         assert!(
             actual.contains(&expected),
-            "pty cwd mismatch:\n  expected: {expected}\n  got: {actual}"
+            "pty did not start in {expected}:\n{actual}"
         );
     }
 }

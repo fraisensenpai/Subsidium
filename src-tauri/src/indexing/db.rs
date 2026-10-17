@@ -166,14 +166,6 @@ pub fn save_conversation_messages(conn: &Connection, conversation_id: i64, messa
     Ok(())
 }
 
-pub fn update_conversation_title(conn: &Connection, conversation_id: i64, title: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE conversations SET title = ?1 WHERE id = ?2",
-        params![title, conversation_id],
-    )?;
-    Ok(())
-}
-
 pub fn list_conversations(conn: &Connection) -> Result<Vec<ConversationSummary>> {
     let mut stmt =
         conn.prepare("SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 50")?;
