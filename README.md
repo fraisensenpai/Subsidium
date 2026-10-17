@@ -1,7 +1,9 @@
 <div align="center">
 
+<img src="assets/app-icon.svg" alt="Subsidium" width="96" height="96">
+
 <h1>
-  <span style="color:#174A3A;">◈ Subsidium</span>
+  <span style="color:#174A3A;">Subsidium</span>
 </h1>
 
 <p>
@@ -30,7 +32,7 @@ Prebuilt installers are attached to every [release](https://github.com/fraisense
 | Platform | Installer |
 | --- | --- |
 | **Windows** | `.msi` installer or `.exe` (NSIS) setup |
-| **macOS** | `.dmg` — Apple Silicon and Intel builds |
+| **macOS** | `.dmg` — `aarch64` for Apple Silicon (M-series), `x64` for Intel |
 | **Linux** | `.deb`, `.rpm` or `.AppImage` |
 
 > **Phase 1 preview.** The builds are produced by CI and are **not code-signed**, so Windows SmartScreen or macOS Gatekeeper may ask you to confirm on first launch. If you would rather skip that, [build from source](#build-from-source) — it is a few commands.
@@ -103,9 +105,7 @@ Changes are saved to disk and the workspace index is updated accordingly.
 
 ### Terminal
 
-A real interactive terminal runs alongside the editor.
-
-On Windows, Subsidium uses a PTY-backed `cmd.exe` session rooted in the selected workspace.
+A real interactive terminal runs alongside the editor — a PTY-backed shell rooted in the selected workspace: `cmd.exe` on Windows, your `$SHELL` (`sh` as a fallback) on macOS and Linux.
 
 It supports:
 
@@ -283,6 +283,21 @@ Changing the workspace starts a fresh conversation context.
 
 ---
 
+## Where Your Data Lives
+
+Subsidium is local-first, so it is worth being explicit about what gets written where.
+
+| What | Where |
+| --- | --- |
+| Workspace index (files, symbols) | `<workspace>/.subsidium/index.db` |
+| Conversation history | the same file — conversations are stored per workspace |
+| App settings (providers, token budget, reset interval, theme) | `subsidium/settings.json` in your OS config directory — `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` on Linux |
+| API keys | your operating system's credential store, never a plain file |
+
+`.subsidium/` is created the first time a workspace is opened and is excluded from discovery, so it never appears in the file tree or in search results. Deleting the folder drops that workspace's index and conversations.
+
+---
+
 ## Settings
 
 ### Providers
@@ -354,6 +369,7 @@ The core desktop environment and agent loop are working, but the project is stil
 * [x] Workspace indexing
 * [x] Tree-sitter parsing
 * [x] SQLite index
+* [x] Re-indexing after agent writes
 * [x] Workspace search
 * [x] Interactive terminal
 * [x] Agent chat
@@ -372,7 +388,7 @@ The core desktop environment and agent loop are working, but the project is stil
 ### Planned
 
 * [ ] Background file watching
-* [ ] Automatic re-indexing
+* [ ] Re-indexing after external file changes
 * [ ] Project summaries
 * [ ] Improved diff review
 * [ ] Persistent agent memory
@@ -415,6 +431,14 @@ npm run tauri build
 The bundles land in `src-tauri/target/release/bundle/` — `.msi` / `.exe` on Windows, `.dmg` on macOS, `.deb` / `.rpm` / `.AppImage` on Linux.
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds all three platforms and publishes them as a downloadable release.
+
+### App icon
+
+The app icon is generated from [`assets/app-icon.svg`](assets/app-icon.svg) — the same mark Subsidium draws in its own header. Edit the SVG, then regenerate every platform size and commit the result:
+
+```bash
+npm run tauri icon assets/app-icon.svg
+```
 
 ### Checks
 
