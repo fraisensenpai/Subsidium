@@ -1,5 +1,6 @@
 use crate::indexing;
 use crate::retrieval;
+use crate::workspace::resolve_workspace_path;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -121,7 +122,8 @@ pub fn execute_read_only(root: &Path, name: &str, args: &Value) -> Result<String
     match name {
         "read_file" => {
             let path = args["path"].as_str().ok_or_else(|| anyhow!("missing 'path'"))?;
-            let content = std::fs::read_to_string(root.join(path))
+            let full = resolve_workspace_path(root, path)?;
+            let content = std::fs::read_to_string(&full)
                 .map_err(|e| anyhow!("could not read {path}: {e}"))?;
             // A huge file dumped into the model's context helps no one —
             // nudge toward search_code for anything this size instead.
@@ -165,6 +167,10 @@ pub fn execute_read_only(root: &Path, name: &str, args: &Value) -> Result<String
         "git_diff" => {
             let mut cmd_args = vec!["diff".to_string()];
             if let Some(path) = args["path"].as_str() {
+                // `--` stops git from reading a path that begins with `-` as
+                // a flag (e.g. `--output=FILE`, which would write a file and
+                // give this read-only tool a side effect).
+                cmd_args.push("--".to_string());
                 cmd_args.push(path.to_string());
             }
             run_git(root, &cmd_args.iter().map(String::as_str).collect::<Vec<_>>())
@@ -173,70 +179,100 @@ pub fn execute_read_only(root: &Path, name: &str, args: &Value) -> Result<String
     }
 }
 
-/// Runs `write_file` or `run_command`. Only ever called after the user has
-/// explicitly approved the pending action (see commands.rs) — nothing in
-/// the agent loop calls this automatically.
+/// Runs `write_file`. Only ever called after the user has explicitly
+/// approved the pending action (see commands.rs) — nothing in the agent
+/// loop calls this automatically.
+///
+/// `run_command` is deliberately *not* handled here: the approval path runs
+/// it through the Terminal panel (`terminal::run_command_sync`) so the user
+/// can watch it live, interact with prompts, and stop it — and so its
+/// output is streamed to the UI rather than captured silently.
 pub fn execute_privileged(root: &Path, name: &str, args: &Value) -> Result<String> {
     match name {
         "write_file" => {
             let path = args["path"].as_str().ok_or_else(|| anyhow!("missing 'path'"))?;
             let content = args["content"].as_str().ok_or_else(|| anyhow!("missing 'content'"))?;
-            std::fs::write(root.join(path), content)
+            let full = resolve_workspace_path(root, path)?;
+            std::fs::write(&full, content)
                 .map_err(|e| anyhow!("could not write {path}: {e}"))?;
             indexing::reindex_file(root, path)?;
             Ok(format!("Wrote {path} ({} bytes).", content.len()))
         }
-        "run_command" => {
-            let command = args["command"].as_str().ok_or_else(|| anyhow!("missing 'command'"))?;
-            run_shell(root, command)
-        }
-        other => Err(anyhow!("'{other}' is not a privileged tool")),
+        other => Err(anyhow!("'{other}' is not a privileged tool handled here")),
     }
-}
-
-/// KNOWN LIMITATION: no timeout — a command that waits on input or never
-/// exits (a dev server started without a background flag, for instance)
-/// will hang this call indefinitely. A real implementation should run
-/// this with a kill-after-N-seconds wrapper; flagging rather than solving
-/// that here since it needs a process-management crate decision.
-fn run_shell(root: &Path, command: &str) -> Result<String> {
-    #[cfg(target_os = "windows")]
-    let output = std::process::Command::new("cmd")
-        .args(["/C", command])
-        .current_dir(root)
-        .output()?;
-
-    #[cfg(not(target_os = "windows"))]
-    let output = std::process::Command::new("sh")
-        .args(["-c", command])
-        .current_dir(root)
-        .output()?;
-
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    combined.push_str(&format!("\n[exit code: {}]", output.status.code().unwrap_or(-1)));
-    Ok(truncate(&combined, 8_000))
 }
 
 /// Runs `git` in the workspace root. Never errors out hard on failure
 /// (no git installed, not a repository, ...) — instead returns that as
 /// text so the model can see "this isn't a git repo" and adjust, rather
 /// than the whole tool call failing opaquely.
+///
+/// Runs with a hard timeout: `git` can block indefinitely on a credential
+/// prompt or a slow remote, which would otherwise hang the agent turn (this
+/// runs inside a blocking task, so it can't be interrupted by Stop).
+/// `GIT_TERMINAL_PROMPT=0` stops it from prompting for credentials at all;
+/// the 30s deadline is the backstop for a genuinely stuck remote.
 fn run_git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = match Command::new("git")
         .args(args)
         .current_dir(root)
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => return Ok(format!("git is not available on this machine: {e}")),
     };
 
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    // Drain both pipes on their own threads so a chatty `git` can't fill the
+    // OS pipe buffer and deadlock while we're polling for exit.
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let out_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(_) => break,
+        }
+    }
+
+    let out = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
+
+    if timed_out {
+        return Ok("git timed out after 30s — the command may be waiting on a network or credential prompt.".to_string());
+    }
+
+    let mut combined = out;
+    combined.push_str(&err);
     if combined.trim().is_empty() {
         combined = "(no output — likely a clean working tree)".to_string();
     }
@@ -251,7 +287,11 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String> {
 pub fn diff_for_write(root: &Path, args: &Value) -> Option<String> {
     let path = args["path"].as_str()?;
     let new_content = args["content"].as_str()?;
-    let old_content = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+    let full = match resolve_workspace_path(root, path) {
+        Ok(p) => p,
+        Err(e) => return Some(format!("Cannot apply: {e}")),
+    };
+    let old_content = std::fs::read_to_string(&full).unwrap_or_default();
 
     if old_content == new_content {
         return Some("No changes — new content is identical to what's on disk.".to_string());

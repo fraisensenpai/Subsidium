@@ -14,7 +14,7 @@ impl GeminiProvider {
         Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 }
@@ -24,7 +24,7 @@ impl GeminiProvider {
 /// which would be useless as chat options here).
 pub async fn list_models(api_key: &str) -> Result<Vec<ModelSummary>> {
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={api_key}");
-    let response = reqwest::Client::new()
+    let response = super::http_client()
         .get(&url)
         .send()
         .await

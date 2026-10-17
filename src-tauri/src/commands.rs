@@ -62,13 +62,26 @@ pub async fn get_index_stats(state: State<'_, AppState>) -> Result<IndexStats, S
         .map_err(|e| e.to_string())
 }
 
-/// Placeholder for the human-readable project summary described in the
-/// spec (architecture narrative, not just counts). Phase 1 returns the
-/// structured stats; a later phase can have the AI provider layer turn
-/// this into prose, or generate it from the index deterministically.
+/// Re-scans the workspace and returns the fresh file tree — used after the
+/// agent creates or changes files so the Explorer reflects them. Also runs a
+/// *shallow* index pass (`build_index_shallow`): new files get a `files`
+/// row and their symbols parsed, and rows for deleted files are dropped, so
+/// a file a `run_command` generated is immediately findable in Search.
+/// Existing files are left untouched (never re-read), so this stays far
+/// cheaper than `open_workspace`'s full hash pass.
 #[tauri::command]
-pub async fn get_project_summary(state: State<'_, AppState>) -> Result<IndexStats, String> {
-    get_index_stats(state).await
+pub async fn refresh_file_tree(state: State<'_, AppState>) -> Result<FileNode, String> {
+    let root = state
+        .active_root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no workspace is open".to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || indexing::build_index_shallow(&root).map(|(tree, _stats)| tree))
+        .await
+        .map_err(|e| format!("refresh task panicked: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 /// Runs the retrieval layer (symbol name / file name / full-text search)
@@ -106,10 +119,13 @@ pub async fn read_file(relative_path: String, state: State<'_, AppState>) -> Res
         .clone()
         .ok_or_else(|| "no workspace is open".to_string())?;
 
-    tauri::async_runtime::spawn_blocking(move || std::fs::read_to_string(root.join(&relative_path)))
-        .await
-        .map_err(|e| format!("read task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let full = crate::workspace::resolve_workspace_path(&root, &relative_path)
+            .map_err(|e| e.to_string())?;
+        std::fs::read_to_string(full).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("read task panicked: {e}"))?
 }
 
 /// Writes the editor's content to disk and incrementally re-indexes just
@@ -134,11 +150,12 @@ pub async fn write_file(
     let root_for_write = root.clone();
     let relative_for_write = relative_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        std::fs::write(root_for_write.join(&relative_for_write), content)
+        let full = crate::workspace::resolve_workspace_path(&root_for_write, &relative_for_write)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(full, content).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("write task panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("write task panicked: {e}"))??;
 
     tauri::async_runtime::spawn_blocking(move || indexing::reindex_file(&root, &relative_path))
         .await
@@ -167,7 +184,8 @@ pub async fn list_provider_models(
             providers::gemini::list_models(&key).await
         }
         "openai_compatible" => {
-            let key = key.ok_or_else(|| "Enter an API key first".to_string())?;
+            // Local gateways (LM Studio, vLLM, LocalAI) often need no key.
+            let key = key.unwrap_or_default();
             let base = base_url.ok_or_else(|| "Enter a base URL first".to_string())?;
             providers::openai_compatible::list_models(&base, &key).await
         }
@@ -354,29 +372,6 @@ pub async fn git_diff(path: Option<String>, state: State<'_, AppState>) -> Resul
 // Terminal panel
 // ─────────────────────────────────────────────────────────────────────
 
-/// Runs a command typed into the Terminal panel's input strip. The
-/// command runs inside a real pseudo-terminal (interactive input works),
-/// output streams back as `terminal:data` events, and the result is *not*
-/// fed to the model — only agent-approved `run_command` calls get routed
-/// back as a tool result.
-#[tauri::command]
-pub async fn terminal_run(command: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if command.trim().is_empty() {
-        return Ok(());
-    }
-    let root = state
-        .active_root
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "no workspace is open".to_string())?;
-    let session = state.running_terminal.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _ = terminal::run_command_sync(&app, &root, &command, &session);
-    });
-    Ok(())
-}
-
 /// Sends raw keystrokes to the process currently running in the Terminal
 /// panel (typed in the xterm view). No-op when nothing is running.
 #[tauri::command]
@@ -402,25 +397,74 @@ pub async fn terminal_resize(cols: u16, rows: u16, state: State<'_, AppState>) -
     Ok(())
 }
 
+/// Starts the Terminal panel's idle interactive shell if nothing is running.
+/// After an agent command finishes, the pane deliberately keeps that
+/// command's output on screen rather than immediately swapping in a fresh
+/// shell (a new console would clear it), so the shell is started lazily the
+/// first time the user types. Idempotent: never replaces a live process.
+#[tauri::command]
+pub async fn terminal_start_shell(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.running_terminal.clone();
+    if terminal::has_live_process(&session) {
+        return Ok(());
+    }
+
+    let root = state
+        .active_root
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "no workspace is open".to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        terminal::spawn_shell(&app, &root, &session).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("terminal task panicked: {e}"))?
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // App settings (token budget)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Returns the app settings with any not-yet-persisted session usage
-/// folded in, so the status bar always reflects the true spend.
-#[tauri::command]
-pub async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+/// Loads settings and applies the periodic auto-reset when one is due,
+/// clearing this session's not-yet-flushed deltas if usage was actually
+/// reset. Persists whenever the reset state changed.
+async fn load_settings_with_reset(state: &State<'_, AppState>) -> Result<AppSettings, String> {
     let mut settings = tauri::async_runtime::spawn_blocking(settings::load)
         .await
         .map_err(|e| format!("task panicked: {e}"))?
         .map_err(|e| e.to_string())?;
+
+    match settings::maybe_auto_reset(&mut settings) {
+        settings::ResetOutcome::Unchanged => {}
+        outcome => {
+            if outcome == settings::ResetOutcome::Reset {
+                *state.pending_usage.lock().unwrap() = 0;
+                *state.pending_model_usage.lock().unwrap() = Vec::new();
+            }
+            let to_save = settings.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || settings::save(&to_save)).await;
+        }
+    }
+    Ok(settings)
+}
+
+/// Returns the app settings with any not-yet-persisted session usage
+/// folded in, so the status bar always reflects the true spend. Also
+/// performs the periodic auto-reset when it's due, so the budget refreshes
+/// even while the app is left open.
+#[tauri::command]
+pub async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let mut settings = load_settings_with_reset(&state).await?;
     settings.tokens_used = settings.tokens_used.saturating_add(*state.pending_usage.lock().unwrap());
     merge_pending_model_usage(&mut settings, &state);
     Ok(settings)
 }
 
-/// Applies a settings change: optionally sets a new token limit, and/or
-/// resets the cumulative usage counter. Returns the resulting settings.
+/// Applies a settings change: the token limit, the auto-reset interval,
+/// and/or a manual usage reset. Returns the resulting settings.
 #[tauri::command]
 pub async fn save_app_settings(
     update: AppSettingsUpdate,
@@ -434,9 +478,18 @@ pub async fn save_app_settings(
     if let Some(limit) = update.token_limit {
         settings.token_limit = limit;
     }
+    if let Some(hours) = update.reset_interval_hours {
+        // Changing the period restarts the countdown from now, so the user
+        // gets a full interval rather than an immediate surprise reset.
+        if hours != settings.reset_interval_hours {
+            settings.last_reset_at = settings::now_unix();
+        }
+        settings.reset_interval_hours = hours;
+    }
     if update.reset_usage {
         settings.tokens_used = 0;
         settings.usage_by_model.clear();
+        settings.last_reset_at = settings::now_unix();
         *state.pending_usage.lock().unwrap() = 0;
         *state.pending_model_usage.lock().unwrap() = Vec::new();
     }
@@ -447,6 +500,32 @@ pub async fn save_app_settings(
         .map_err(|e| format!("task panicked: {e}"))?
         .map_err(|e| e.to_string())?;
     Ok(settings)
+}
+
+/// Opens an http(s) URL in the user's default browser. A Tauri webview is
+/// not a browser — clicking a plain `<a target="_blank">` does nothing — so
+/// "open in browser" affordances in the UI route through here.
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs can be opened".to_string());
+    }
+
+    // Launch the OS handler directly rather than through a shell: cmd.exe
+    // would expand `%`-sequences and treat `&` as a command separator,
+    // corrupting percent-encoded URLs and query strings.
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("explorer").arg(&url).spawn();
+
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    spawned
+        .map(|_| ())
+        .map_err(|e| format!("could not open the link: {e}"))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -470,7 +549,7 @@ pub struct ToolLogEntry {
 /// synchronous round-trip from the frontend's point of view.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentTurnResult {
-    pub status: String, // "final" | "pending_approval"
+    pub status: String, // "final" | "pending_approval" | "stopped" | "aborted" | "limit_reached" | "step_limit"
     pub text: Option<String>,
     pub thinking: Option<String>,
     pub pending_tool: Option<ToolCall>,
@@ -491,11 +570,17 @@ pub struct AgentTurnResult {
 }
 
 /// Requests the running agent turn to stop. The loop honors this between
-/// steps (after the in-flight provider call returns) and reports back
-/// with a "stopped" result.
+/// steps and right after each provider call returns, reporting back with a
+/// "stopped" result; any command the agent is currently running in the
+/// Terminal panel is killed immediately.
 #[tauri::command]
 pub async fn agent_stop(state: State<'_, AppState>) -> Result<(), String> {
     state.agent_stop_requested.store(true, Ordering::SeqCst);
+    // Ask a command the agent is blocked on to stop. This only sets a flag
+    // the drain loop polls (it holds the child handle, so it kills the
+    // process itself) — the idle shell is deliberately left alone when the
+    // agent is just thinking.
+    terminal::request_stop(&state.running_terminal);
     Ok(())
 }
 
@@ -504,13 +589,22 @@ pub async fn agent_stop(state: State<'_, AppState>) -> Result<(), String> {
 /// Refuses to start if the global token budget has been spent.
 #[tauri::command]
 pub async fn agent_send_message(text: String, state: State<'_, AppState>) -> Result<AgentTurnResult, String> {
+    // One turn at a time: a message sent right after "New conversation" must
+    // not run concurrently with the turn that reset abandoned — both would
+    // write to the single shared history. The lock is released on return.
+    let _turn = state.agent_turn_lock.lock().await;
+
     // A fresh turn starts clean — clear any leftover stop request (e.g.
     // from a Stop click that arrived just after the previous turn ended).
     state.agent_stop_requested.store(false, Ordering::SeqCst);
-    let settings = tauri::async_runtime::spawn_blocking(settings::load)
-        .await
-        .map_err(|e| format!("task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
+    // Remember which conversation this turn belongs to; if it's replaced
+    // before the turn finishes, the loop abandons it instead of writing the
+    // reply into the new one.
+    let generation = state.conversation_generation.load(Ordering::SeqCst);
+
+    // Apply a due periodic reset first, so a spent budget doesn't block the
+    // first message of a new period.
+    let settings = load_settings_with_reset(&state).await?;
     let used = settings.tokens_used.saturating_add(*state.pending_usage.lock().unwrap());
     if settings.token_limit > 0 && used >= settings.token_limit {
         return Err(format!(
@@ -526,7 +620,7 @@ pub async fn agent_send_message(text: String, state: State<'_, AppState>) -> Res
         .unwrap()
         .push(AgentMessage::User { text });
 
-    let result = run_agent_loop(&state).await;
+    let result = run_agent_loop(&state, generation).await;
     flush_pending_usage(&state).await;
     result
 }
@@ -546,12 +640,17 @@ pub async fn agent_respond_to_approval(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentTurnResult, String> {
+    // Serialize with other turns (see agent_send_message).
+    let _turn = state.agent_turn_lock.lock().await;
+
     let root = state
         .active_root
         .lock()
         .unwrap()
         .clone()
         .ok_or_else(|| "no workspace is open".to_string())?;
+
+    let generation = state.conversation_generation.load(Ordering::SeqCst);
 
     let pending = state
         .pending_tool_call
@@ -589,14 +688,34 @@ pub async fn agent_respond_to_approval(
         "The user denied this action. Do not attempt it again without asking first; suggest an alternative or ask a clarifying question.".to_string()
     };
 
+    // The conversation was replaced while the action was running (the user
+    // hit "New conversation") — drop the result instead of writing it into
+    // the conversation they're now in.
+    if state.conversation_generation.load(Ordering::SeqCst) != generation {
+        return Ok(ended_early_result(
+            &root,
+            &state,
+            generation,
+            "aborted",
+            None,
+            Vec::new(),
+            String::new(),
+            None,
+            None,
+        )
+        .await);
+    }
+
     state.agent_history.lock().unwrap().push(AgentMessage::ToolResult {
         tool_call_id: pending.id,
         name: pending.name,
         content,
     });
 
-    state.agent_stop_requested.store(false, Ordering::SeqCst);
-    let result = run_agent_loop(&state).await;
+    // NOTE: deliberately do NOT clear agent_stop_requested here. If the user
+    // pressed Stop while the command/action was running, the loop's first
+    // check must still see it and stop instead of continuing the turn.
+    let result = run_agent_loop(&state, generation).await;
     flush_pending_usage(&state).await;
     result
 }
@@ -606,11 +725,20 @@ pub async fn agent_respond_to_approval(
 /// new row in the conversations table rather than continuing the old one.
 #[tauri::command]
 pub async fn agent_reset(state: State<'_, AppState>) -> Result<(), String> {
+    // Invalidate any in-flight turn *first*, so it can't write its reply
+    // into the conversation we're about to clear (the "reply landed in the
+    // new chat" bug).
+    state.conversation_generation.fetch_add(1, Ordering::SeqCst);
     *state.agent_history.lock().unwrap() = Vec::new();
     *state.pending_tool_call.lock().unwrap() = None;
     *state.usage_totals.lock().unwrap() = (0, 0);
     *state.active_conversation_id.lock().unwrap() = None;
     state.agent_stop_requested.store(false, Ordering::SeqCst);
+    // A command left running by the conversation we just abandoned would
+    // otherwise linger in the Terminal panel, still attached and swallowing
+    // any input typed into it. Ask it to stop (the runner owns the child and
+    // is the one that can actually kill it).
+    terminal::request_stop(&state.running_terminal);
     Ok(())
 }
 
@@ -658,12 +786,19 @@ pub async fn load_conversation(id: i64, state: State<'_, AppState>) -> Result<Ve
     .map_err(|e| format!("task panicked: {e}"))?
     .map_err(|e| e.to_string())?;
 
+    // Switching conversations invalidates any turn still running for the one
+    // we're leaving, so its reply can't land here.
+    state.conversation_generation.fetch_add(1, Ordering::SeqCst);
+
     *state.agent_history.lock().unwrap() = messages.clone();
     *state.active_conversation_id.lock().unwrap() = Some(id);
     *state.pending_tool_call.lock().unwrap() = None;
     // Historical usage wasn't stored per-message, so the session counter
     // restarts at 0 rather than showing a stale or wrong total.
     *state.usage_totals.lock().unwrap() = (0, 0);
+    // Stop any command the conversation we're leaving left running (see
+    // agent_reset) — it belongs to a turn that's now abandoned.
+    terminal::request_stop(&state.running_terminal);
 
     Ok(messages)
 }
@@ -691,6 +826,9 @@ pub async fn delete_conversation(id: i64, state: State<'_, AppState>) -> Result<
     let mut active = state.active_conversation_id.lock().unwrap();
     if *active == Some(id) {
         *active = None;
+        // An in-flight turn would otherwise recreate the row we just
+        // deleted; invalidate it.
+        state.conversation_generation.fetch_add(1, Ordering::SeqCst);
     }
     Ok(())
 }
@@ -765,7 +903,18 @@ async fn flush_pending_usage(state: &State<'_, AppState>) {
 /// first turn. Best-effort: a persistence failure is logged to stderr but
 /// never surfaces to the user — losing the saved transcript shouldn't
 /// also break the live conversation they're in the middle of.
-async fn persist_conversation(root: &std::path::Path, state: &State<'_, AppState>) -> Option<i64> {
+///
+/// `generation` is the conversation the caller's turn belongs to: if it has
+/// since been replaced, nothing is written (the history now belongs to a
+/// different conversation).
+async fn persist_conversation(
+    root: &std::path::Path,
+    state: &State<'_, AppState>,
+    generation: u64,
+) -> Option<i64> {
+    if state.conversation_generation.load(Ordering::SeqCst) != generation {
+        return None;
+    }
     let history = state.agent_history.lock().unwrap().clone();
     if history.is_empty() {
         return None;
@@ -822,12 +971,113 @@ async fn persist_conversation(root: &std::path::Path, state: &State<'_, AppState
     Some(conversation_id)
 }
 
+/// Builds the result for a turn that ended without a normal answer:
+/// `"stopped"` (the user pressed Stop) or `"aborted"` (the conversation was
+/// replaced mid-turn). Persistence is a no-op for an abandoned turn, so its
+/// reply can never leak into the conversation the user switched to.
+#[allow(clippy::too_many_arguments)]
+async fn ended_early_result(
+    root: &std::path::Path,
+    state: &State<'_, AppState>,
+    generation: u64,
+    status: &str,
+    text: Option<String>,
+    tool_log: Vec<ToolLogEntry>,
+    model: String,
+    input: Option<u64>,
+    output: Option<u64>,
+) -> AgentTurnResult {
+    let totals = *state.usage_totals.lock().unwrap();
+    let (tokens_used, token_limit) = usage_snapshot(state).await;
+    let conversation_id = persist_conversation(root, state, generation).await;
+    AgentTurnResult {
+        status: status.to_string(),
+        text,
+        thinking: None,
+        pending_tool: None,
+        pending_description: None,
+        pending_diff: None,
+        tool_log,
+        model: if model.is_empty() { None } else { Some(model) },
+        input_tokens: input,
+        output_tokens: output,
+        total_input_tokens: totals.0,
+        total_output_tokens: totals.1,
+        conversation_id,
+        tokens_used,
+        token_limit,
+    }
+}
+
+/// Caps what is sent to the provider so a long conversation can't blow past
+/// the model's context window. The *stored* transcript is never touched —
+/// only the copy handed to the provider. The cut is always moved forward to
+/// a `User` message so an assistant `tool_call` is never separated from the
+/// `ToolResult` that answers it (providers reject an orphaned tool result).
+fn trim_history(history: &[AgentMessage]) -> Vec<AgentMessage> {
+    // Rough, provider-agnostic budget. Characters ≈ tokens × 4, so this is
+    // on the order of ~30k tokens of history — comfortably inside every
+    // model these providers expose, with room for the reply and tools.
+    const MAX_MESSAGES: usize = 40;
+    const MAX_CHARS: usize = 120_000;
+
+    fn approx_len(message: &AgentMessage) -> usize {
+        match message {
+            AgentMessage::User { text } => text.chars().count() + 8,
+            AgentMessage::Assistant { text, tool_calls } => {
+                text.as_deref().map(|t| t.chars().count()).unwrap_or(0)
+                    + tool_calls
+                        .iter()
+                        .map(|c| c.arguments.to_string().chars().count() + 24)
+                        .sum::<usize>()
+                    + 8
+            }
+            AgentMessage::ToolResult { content, .. } => content.chars().count() + 8,
+        }
+    }
+
+    let total: usize = history.iter().map(approx_len).sum();
+    if history.len() <= MAX_MESSAGES && total <= MAX_CHARS {
+        return history.to_vec();
+    }
+
+    // Walk back from the newest message, keeping as much as fits the budget.
+    let mut start = history.len();
+    let mut chars = 0usize;
+    for (i, message) in history.iter().enumerate().rev() {
+        if history.len() - i > MAX_MESSAGES || chars + approx_len(message) > MAX_CHARS {
+            break;
+        }
+        chars += approx_len(message);
+        start = i;
+    }
+
+    // Align the cut to a `User` boundary so tool-call/tool-result pairs stay
+    // whole. Prefer the first `User` at or after the cut; if the cut landed
+    // past the last user message, fall back to that user message itself.
+    if let Some(offset) = history[start..]
+        .iter()
+        .position(|m| matches!(m, AgentMessage::User { .. }))
+    {
+        start += offset;
+    } else if let Some(last_user) = history
+        .iter()
+        .rposition(|m| matches!(m, AgentMessage::User { .. }))
+    {
+        start = last_user;
+    }
+
+    history[start..].to_vec()
+}
+
 /// The actual loop: ask the model for a turn, and if it wants to call a
 /// tool, either run it immediately (read-only) and loop again, or stop
 /// and hand control back to the user (privileged). Shared by
 /// `agent_send_message` and `agent_respond_to_approval` — both just push
-/// a message onto the history first and then call this.
-async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, String> {
+/// a message onto the history first and then call this. `generation` is the
+/// conversation this turn belongs to; if it changes mid-turn the loop
+/// abandons the turn (see `ended_early_result`).
+async fn run_agent_loop(state: &State<'_, AppState>, generation: u64) -> Result<AgentTurnResult, String> {
     let root = state
         .active_root
         .lock()
@@ -849,8 +1099,26 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
     let mut last_output: Option<u64> = None;
 
     for _ in 0..agent::MAX_STEPS {
-        // Stop requested mid-turn? End here as soon as the in-flight
-        // provider call returns, before starting the next step.
+        // The conversation was replaced while this turn was in flight (the
+        // user started a new one or opened another) — abandon it: no history
+        // writes, no persistence, and a status the panel drops.
+        if state.conversation_generation.load(Ordering::SeqCst) != generation {
+            return Ok(ended_early_result(
+                &root,
+                state,
+                generation,
+                "aborted",
+                None,
+                tool_log,
+                last_model,
+                last_input,
+                last_output,
+            )
+            .await);
+        }
+
+        // Stop requested since the last checkpoint. End here, before starting
+        // the next step.
         if state.agent_stop_requested.swap(false, Ordering::SeqCst) {
             state
                 .agent_history
@@ -860,29 +1128,54 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
                     text: Some("Stopped by the user.".to_string()),
                     tool_calls: Vec::new(),
                 });
-            let totals = *state.usage_totals.lock().unwrap();
-            let (tokens_used, token_limit) = usage_snapshot(state).await;
-            let conversation_id = persist_conversation(&root, state).await;
-            return Ok(AgentTurnResult {
-                status: "stopped".to_string(),
-                text: Some("Stopped by the user.".to_string()),
-                thinking: None,
-                pending_tool: None,
-                pending_description: None,
-                pending_diff: None,
+            return Ok(ended_early_result(
+                &root,
+                state,
+                generation,
+                "stopped",
+                Some("Stopped by the user.".to_string()),
                 tool_log,
-                model: if last_model.is_empty() { None } else { Some(last_model) },
-                input_tokens: last_input,
-                output_tokens: last_output,
-                total_input_tokens: totals.0,
-                total_output_tokens: totals.1,
-                conversation_id,
-                tokens_used,
-                token_limit,
-            });
+                last_model,
+                last_input,
+                last_output,
+            )
+            .await);
         }
 
-        let history = state.agent_history.lock().unwrap().clone();
+        // Enforce the budget *inside* the loop, not only at the start of a
+        // turn. One turn can make up to MAX_STEPS provider calls, and a turn
+        // resumed from an approval walks straight back into this loop —
+        // without this check the limit only ever governed the first call.
+        {
+            let (used, limit) = usage_snapshot(state).await;
+            if limit > 0 && used >= limit {
+                let text = format!(
+                    "Token limit reached — {used} of {limit} weighted tokens used. \
+                     Raise the limit in Settings → App to keep going."
+                );
+                state.agent_history.lock().unwrap().push(AgentMessage::Assistant {
+                    text: Some(text.clone()),
+                    tool_calls: Vec::new(),
+                });
+                return Ok(ended_early_result(
+                    &root,
+                    state,
+                    generation,
+                    "limit_reached",
+                    Some(text),
+                    tool_log,
+                    last_model,
+                    last_input,
+                    last_output,
+                )
+                .await);
+            }
+        }
+
+        let history = {
+            let full = state.agent_history.lock().unwrap();
+            trim_history(&full)
+        };
 
         let turn = provider
             .send_agent_turn(&history, &tools)
@@ -909,6 +1202,48 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
                 .push((config.provider.clone(), turn.model.clone(), i, o));
         }
 
+        // Usage above is real — the provider call happened and is billed —
+        // but if the conversation was replaced, or Stop arrived while the
+        // call was in flight, discard the model's response. Checking *here*
+        // (not only at the top of the loop) is what makes Stop work on a
+        // turn where the model answers directly and never loops again.
+        if state.conversation_generation.load(Ordering::SeqCst) != generation {
+            return Ok(ended_early_result(
+                &root,
+                state,
+                generation,
+                "aborted",
+                None,
+                tool_log,
+                last_model,
+                last_input,
+                last_output,
+            )
+            .await);
+        }
+        if state.agent_stop_requested.swap(false, Ordering::SeqCst) {
+            state
+                .agent_history
+                .lock()
+                .unwrap()
+                .push(AgentMessage::Assistant {
+                    text: Some("Stopped by the user.".to_string()),
+                    tool_calls: Vec::new(),
+                });
+            return Ok(ended_early_result(
+                &root,
+                state,
+                generation,
+                "stopped",
+                Some("Stopped by the user.".to_string()),
+                tool_log,
+                last_model,
+                last_input,
+                last_output,
+            )
+            .await);
+        }
+
         if turn.tool_calls.is_empty() {
             state.agent_history.lock().unwrap().push(AgentMessage::Assistant {
                 text: turn.text.clone(),
@@ -917,7 +1252,7 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
 
             let totals = *state.usage_totals.lock().unwrap();
             let (tokens_used, token_limit) = usage_snapshot(state).await;
-            let conversation_id = persist_conversation(&root, state).await;
+            let conversation_id = persist_conversation(&root, state, generation).await;
             return Ok(AgentTurnResult {
                 status: "final".to_string(),
                 text: Some(turn.text.unwrap_or_default()),
@@ -937,10 +1272,47 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
             });
         }
 
-        // Handle one tool call per step (models occasionally ask for
-        // several at once; we run the first and let the loop pick up the
-        // rest on the next turn rather than assuming multi-call ordering
-        // doesn't matter).
+        // Models occasionally ask for several tools at once. When they're
+        // all read-only we run them all in this step and feed every result
+        // back — nothing is silently dropped and it saves a round-trip. If
+        // any call needs approval we fall back to handling just the first
+        // one, so the privileged path stays strictly one-approval-at-a-time.
+        if turn.tool_calls.len() > 1 && turn.tool_calls.iter().all(|c| agent::is_read_only(&c.name)) {
+            state.agent_history.lock().unwrap().push(AgentMessage::Assistant {
+                text: turn.text.clone(),
+                tool_calls: turn.tool_calls.clone(),
+            });
+
+            for call in turn.tool_calls.clone() {
+                let root_for_tool = root.clone();
+                let call_for_tool = call.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    agent::execute_read_only(&root_for_tool, &call_for_tool.name, &call_for_tool.arguments)
+                })
+                .await
+                .map_err(|e| format!("tool task panicked: {e}"))?
+                .unwrap_or_else(|e| format!("Error: {e}"));
+
+                tool_log.push(ToolLogEntry {
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    result_preview: result.chars().take(200).collect(),
+                });
+
+                state.agent_history.lock().unwrap().push(AgentMessage::ToolResult {
+                    tool_call_id: call.id,
+                    name: call.name,
+                    content: result,
+                });
+            }
+            // Loop again — the model gets every tool result on the next turn.
+            continue;
+        }
+
+        // Otherwise handle one tool call per step (a privileged call, or a
+        // mixed batch: run the first and let the loop pick up the rest on
+        // the next turn rather than assuming multi-call ordering doesn't
+        // matter).
         let call = turn.tool_calls[0].clone();
 
         state.agent_history.lock().unwrap().push(AgentMessage::Assistant {
@@ -988,7 +1360,7 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
 
             let totals = *state.usage_totals.lock().unwrap();
             let (tokens_used, token_limit) = usage_snapshot(state).await;
-            let conversation_id = persist_conversation(&root, state).await;
+            let conversation_id = persist_conversation(&root, state, generation).await;
             return Ok(AgentTurnResult {
                 status: "pending_approval".to_string(),
                 text: turn.text,
@@ -1011,9 +1383,9 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
 
     let totals = *state.usage_totals.lock().unwrap();
     let (tokens_used, token_limit) = usage_snapshot(state).await;
-    let conversation_id = persist_conversation(&root, state).await;
+    let conversation_id = persist_conversation(&root, state, generation).await;
     Ok(AgentTurnResult {
-        status: "final".to_string(),
+        status: "step_limit".to_string(),
         text: Some(format!(
             "Stopped after {} steps without a final answer — the task may be too large for one turn. \
              Try breaking it down, or ask me to continue.",
@@ -1033,4 +1405,82 @@ async fn run_agent_loop(state: &State<'_, AppState>) -> Result<AgentTurnResult, 
         tokens_used,
         token_limit,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(text: &str) -> AgentMessage {
+        AgentMessage::User {
+            text: text.to_string(),
+        }
+    }
+
+    fn assistant(text: Option<&str>, calls: Vec<ToolCall>) -> AgentMessage {
+        AgentMessage::Assistant {
+            text: text.map(|t| t.to_string()),
+            tool_calls: calls,
+        }
+    }
+
+    fn tool_result(id: &str) -> AgentMessage {
+        AgentMessage::ToolResult {
+            tool_call_id: id.to_string(),
+            name: "read_file".to_string(),
+            content: "ok".to_string(),
+        }
+    }
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "src/main.rs" }),
+            thought_signature: None,
+        }
+    }
+
+    #[test]
+    fn trim_history_leaves_short_conversations_untouched() {
+        let history = vec![user("hi"), assistant(Some("hello"), vec![])];
+        assert_eq!(trim_history(&history).len(), 2);
+    }
+
+    #[test]
+    fn trim_history_drops_oldest_but_keeps_tool_pairs_whole() {
+        // 30 user/assistant/toolresult exchanges blows the message cap.
+        let mut history = Vec::new();
+        for i in 0..40 {
+            history.push(user(&format!("question {i}")));
+            history.push(assistant(None, vec![call(&format!("c{i}"))]));
+            history.push(tool_result(&format!("c{i}")));
+            history.push(assistant(Some(&format!("answer {i}")), vec![]));
+        }
+
+        let trimmed = trim_history(&history);
+
+        assert!(trimmed.len() < history.len(), "expected trimming to happen");
+        // Never start on a ToolResult — that would be an orphaned tool result
+        // some providers reject outright.
+        assert!(
+            !matches!(trimmed.first(), Some(AgentMessage::ToolResult { .. })),
+            "trimmed history must start on a user/assistant boundary"
+        );
+        // The newest message always survives.
+        assert!(matches!(trimmed.last(), Some(AgentMessage::Assistant { .. })));
+    }
+
+    #[test]
+    fn trim_history_keeps_the_cut_on_a_user_boundary() {
+        let mut history = Vec::new();
+        for i in 0..50 {
+            history.push(user(&format!("u{i}")));
+            history.push(assistant(Some("a"), vec![]));
+        }
+
+        let trimmed = trim_history(&history);
+        assert!(matches!(trimmed.first(), Some(AgentMessage::User { .. })));
+        assert!(trimmed.len() < history.len());
+    }
 }

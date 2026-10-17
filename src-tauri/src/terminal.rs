@@ -2,12 +2,20 @@ use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 pub const DATA_EVENT: &str = "terminal:data";
 pub const STATUS_EVENT: &str = "terminal:status";
+
+/// Upper bound on how long an agent-run command may occupy the pane/turn.
+/// A command that never exits — a dev server started with no background
+/// flag, an interactive prompt, a runaway loop — would otherwise hang the
+/// agent indefinitely, since the loop blocks until the process is gone.
+/// Killing it lets the turn continue and tells the model what happened.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A raw chunk of terminal output. Deliberately not line-based: the child
 /// runs inside a real TTY, so its output can contain ANSI escape
@@ -24,7 +32,8 @@ pub struct TerminalDataEvent {
 /// - "running": a command (agent-approved or otherwise) is taking over
 ///   the pane.
 /// - "exit": the command finished (or was killed); `code` is its exit
-///   status. The idle shell is respawned right after.
+///   status. Nothing is running afterwards — the shell is started lazily
+///   the next time the user types into the pane.
 #[derive(Clone, serde::Serialize)]
 pub struct TerminalStatusEvent {
     pub status: String,
@@ -53,6 +62,13 @@ pub struct PtySession {
     /// not reach the frontend (it would be interleaved with the new process's
     /// output and can even contain escape sequences that clear the screen).
     pub generation: Mutex<u64>,
+    /// Set when whatever runs in the pane should be stopped. `kill_current`
+    /// sets it, but the process that's actually running a command owns the
+    /// child handle for the whole time it drains output, so the drain loop
+    /// polls this flag and kills the child itself instead of the killer
+    /// blocking on the (held) child lock. Cleared whenever a new process is
+    /// spawned.
+    pub kill_requested: AtomicBool,
 }
 
 /// Interactive shell for a fresh prompt, started *in* `root`. On Windows
@@ -102,22 +118,73 @@ impl PtySession {
             cols: Mutex::new(100),
             rows: Mutex::new(30),
             generation: Mutex::new(0),
+            kill_requested: AtomicBool::new(false),
         }
     }
 }
 
-/// Kills the process currently running in the terminal, if any. Called
-/// when a new process takes over the pane and by the Kill button.
+/// Kills the process currently running in the terminal, if any. Called when
+/// a new process takes over the pane, and by the Kill button. (The agent's
+/// Stop button uses `request_stop` instead, so it leaves the idle shell
+/// alone.)
 pub fn kill_current(session: &PtySession) {
-    // Closing the master PTY first unblocks the reader thread (its read()
+    // Flag it first: a `run_command_sync` currently draining output holds
+    // the child lock for the whole run, so the killer below would block
+    // until the command finished on its own. The drain loop polls this and
+    // kills the child itself, so Stop takes effect immediately.
+    session.kill_requested.store(true, Ordering::SeqCst);
+    // Closing the master PTY next unblocks the reader thread (its read()
     // call returns an error or EOF), so it exits instead of lingering and
     // emitting stale data into the next process's output.
     *session.master.lock().unwrap() = None;
     if let Some(mut child) = session.child.lock().unwrap().take() {
+        kill_process_tree(child.as_mut());
         let _ = child.kill();
         let _ = child.wait();
     }
     *session.writer.lock().unwrap() = None;
+}
+
+/// Asks whatever is running in the pane to stop *without* touching the idle
+/// interactive shell: only a command being drained checks this flag, and
+/// since it holds the child handle for the whole run it kills the process
+/// itself. Used by the agent's Stop button so it never tears down the
+/// shell when the agent is merely thinking (not running a command).
+pub fn request_stop(session: &PtySession) {
+    session.kill_requested.store(true, Ordering::SeqCst);
+}
+
+/// Kills a process *and its descendants*. `Child::kill` only terminates the
+/// direct child (e.g. `cmd.exe`), which is not enough for the common "the
+/// agent started a dev server" case: the shell dies but the node/python
+/// process it launched keeps running and holding the port. On Windows
+/// `taskkill /T` walks the process tree; elsewhere the POSIX shells we spawn
+/// are one-shot so killing the direct child is sufficient.
+fn kill_process_tree(child: &mut (dyn Child + Send + Sync)) {
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = child.process_id() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = child;
+    }
+}
+
+/// Whether a process is currently attached to the pane — the idle shell or
+/// a command that's still running. Lets `terminal_start_shell` be
+/// idempotent: it must not spawn a new console (which would clear the pane)
+/// when something is already there.
+pub fn has_live_process(session: &PtySession) -> bool {
+    let mut guard = session.child.lock().unwrap();
+    match guard.as_mut() {
+        Some(child) => child.try_wait().ok().flatten().is_none(),
+        None => false,
+    }
 }
 
 /// Writes raw input (keystrokes) to the running process's TTY — the idle
@@ -189,6 +256,10 @@ fn spawn_pty(
     *session.master.lock().unwrap() = Some(master);
     *session.writer.lock().unwrap() = Some(writer);
     *session.child.lock().unwrap() = Some(child);
+
+    // A fresh process starts un-killed, even if the previous one was
+    // stopped (the flag is sticky so an in-flight drain loop can see it).
+    session.kill_requested.store(false, Ordering::SeqCst);
 
     // Bump the generation so any in-flight reader threads from a previous
     // process will stop emitting — their chunks belong to a dead PTY and
@@ -309,8 +380,10 @@ pub fn spawn_shell(app: &AppHandle, root: &Path, session: &Arc<PtySession>) -> R
 /// Used by the agent for approved `run_command` calls — the user watches
 /// it run live in the Terminal panel *and* can interact with it (type
 /// answers to prompts), and the model still receives the output as the
-/// tool result. The idle shell is respawned once the command exits so
-/// the terminal stays usable.
+/// tool result. The run is bounded: the Stop button kills the process, and
+/// `COMMAND_TIMEOUT` kills it if it never exits on its own, so a stuck
+/// command can't hang the turn forever. Nothing is left running
+/// afterwards; the idle shell comes back lazily on the next keystroke.
 pub fn run_command_sync(
     app: &AppHandle,
     root: &Path,
@@ -326,6 +399,16 @@ pub fn run_command_sync(
 
     let rx = spawn_pty(app, root, cmd, session)?;
 
+    // Make the command visible in the pane: unlike an interactive prompt,
+    // `cmd /C` (and `sh -c`) don't echo the command they were handed, so
+    // without this the user sees output with no idea what produced it.
+    let _ = app.emit(
+        DATA_EVENT,
+        TerminalDataEvent {
+            data: format!("> {command}\r\n"),
+        },
+    );
+
     let _ = app.emit(
         STATUS_EVENT,
         TerminalStatusEvent {
@@ -339,11 +422,13 @@ pub fn run_command_sync(
     // can't wait for pipe EOF here: the app keeps the pty's write end
     // (the writer) alive for the life of the session, so the read side
     // never signals EOF. Polling the child handle is the reliable signal.
-    let combined = {
+    let (combined, reason) = {
         let mut guard = session.child.lock().unwrap();
         match guard.as_mut() {
-            Some(child) => drain_until_exit(child, &rx),
-            None => String::new(),
+            Some(child) => {
+                drain_until_exit(child, &rx, &session.kill_requested, COMMAND_TIMEOUT)
+            }
+            None => (String::new(), EndReason::Exited),
         }
     };
 
@@ -351,9 +436,24 @@ pub fn run_command_sync(
     // surfaces a non-zero teardown code.
     let code = match session.child.lock().unwrap().take() {
         Some(mut child) => child.wait().ok().map(|s| s.exit_code()),
-        // Already killed / taken by a newer command.
+        // Already killed / taken by a newer command (the Stop button runs
+        // `kill_current` while we're draining).
         None => None,
     };
+
+    // Detach the dead command's PTY handles *first*, so nothing is running.
+    // Emitting "exit" after this (rather than before) matters: a listener
+    // that reacts to "exit" by starting a fresh shell — e.g. the panel
+    // running a command queued while this one was stopped — would otherwise
+    // race with the cleanup below, which spawns no process but does tear
+    // down the session. Keeping the order means "exit" is the last word.
+    //
+    // Respawning the idle shell here instead would allocate a brand new
+    // console, and Windows' ConPTY clears the screen when it starts — which
+    // wiped the exact output the user was reading (the "command shows up,
+    // then the terminal resets a moment later" bug). The shell is started
+    // lazily on the user's next keystroke (`terminal_start_shell`).
+    kill_current(session);
 
     let _ = app.emit(
         STATUS_EVENT,
@@ -364,12 +464,18 @@ pub fn run_command_sync(
         },
     );
 
-    // Bring the interactive shell back so the terminal stays usable.
-    let _ = spawn_shell(app, root, session);
-
     // A TTY delivers CRLF line endings; normalize for the model's sake and
     // append the exit status (the agent sees it in the tool result).
     let mut combined = combined.replace("\r\n", "\n").replace('\r', "\n");
+    match reason {
+        EndReason::Killed => combined.push_str("\n[stopped by the user]"),
+        EndReason::TimedOut => combined.push_str(&format!(
+            "\n[timed out after {}s — process killed. If this command is long-running \
+             or waits for input, run it in the background or with a non-interactive flag]",
+            COMMAND_TIMEOUT.as_secs()
+        )),
+        EndReason::Exited => {}
+    }
     match code {
         Some(c) => combined.push_str(&format!("\n[exit code: {c}]")),
         None => combined.push_str("\n[process terminated]\n"),
@@ -377,33 +483,68 @@ pub fn run_command_sync(
     Ok(truncate_output(&combined, 8_000))
 }
 
-/// Drains the receiver into `combined` until the child process exits,
-/// then gives stragglers a short grace period. Returns `combined`.
+/// How an agent-run command stopped.
+enum EndReason {
+    /// The process exited on its own.
+    Exited,
+    /// The Stop / Kill button asked it to stop.
+    Killed,
+    /// It never exited and hit `COMMAND_TIMEOUT`.
+    TimedOut,
+}
+
+/// Drains the receiver into the combined output until the child exits, is
+/// asked to stop, or times out. Returns the output and how it ended.
 ///
 /// See the note in `run_command_sync` on why process-exit polling (not
 /// pipe EOF) is the termination signal.
 fn drain_until_exit(
     child: &mut Box<dyn Child + Send + Sync>,
     rx: &mpsc::Receiver<String>,
-) -> String {
+    kill_requested: &AtomicBool,
+    timeout: std::time::Duration,
+) -> (String, EndReason) {
     let mut combined = String::new();
+    let deadline = std::time::Instant::now() + timeout;
     loop {
+        // Stop requested. We hold the child lock for the whole drain, so
+        // the killer couldn't take the handle — it only set the flag; the
+        // killing happens here.
+        if kill_requested.swap(false, Ordering::SeqCst) {
+            kill_process_tree(child.as_mut());
+            let _ = child.kill();
+            collect_stragglers(&mut combined, rx);
+            return (combined, EndReason::Killed);
+        }
+
         let exited = child.try_wait().ok().flatten().is_some();
         drain_available(&mut combined, rx);
         if exited {
-            // The last bytes may still be in flight; collect briefly.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-            while std::time::Instant::now() < deadline {
-                match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Ok(chunk) => combined.push_str(&chunk),
-                    Err(_) => break,
-                }
-            }
-            break;
+            collect_stragglers(&mut combined, rx);
+            return (combined, EndReason::Exited);
         }
+
+        if std::time::Instant::now() >= deadline {
+            kill_process_tree(child.as_mut());
+            let _ = child.kill();
+            collect_stragglers(&mut combined, rx);
+            return (combined, EndReason::TimedOut);
+        }
+
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    combined
+}
+
+/// Collects the last bytes that may still be in flight once the process is
+/// gone, stopping as soon as the channel falls quiet for a moment.
+fn collect_stragglers(combined: &mut String, rx: &mpsc::Receiver<String>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(chunk) => combined.push_str(&chunk),
+            Err(_) => break,
+        }
+    }
 }
 
 fn drain_available(combined: &mut String, rx: &mpsc::Receiver<String>) {

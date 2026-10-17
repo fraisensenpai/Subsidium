@@ -19,6 +19,13 @@ pub struct AppSettings {
     pub tokens_used: u64,
     #[serde(default)]
     pub usage_by_model: Vec<ModelUsageRecord>,
+    /// How often the usage counters auto-reset, in hours (`0` = never).
+    #[serde(default = "default_reset_interval_hours")]
+    pub reset_interval_hours: u64,
+    /// Unix timestamp (seconds) of the last reset, or `0` if the clock
+    /// hasn't been started yet. Drives the periodic auto-reset.
+    #[serde(default)]
+    pub last_reset_at: i64,
 }
 
 /// Cumulative usage attributable to one (provider, model) pair.
@@ -37,14 +44,65 @@ fn default_token_limit() -> u64 {
     1_000_000
 }
 
+/// Daily by default — a budget that never resets eventually blocks the
+/// agent forever, which isn't what "budget" means to most users.
+fn default_reset_interval_hours() -> u64 {
+    24
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             token_limit: default_token_limit(),
             tokens_used: 0,
             usage_by_model: Vec::new(),
+            reset_interval_hours: default_reset_interval_hours(),
+            last_reset_at: 0,
         }
     }
+}
+
+/// Current wall-clock time as a Unix timestamp (seconds).
+pub fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// What the periodic-reset check did, so callers know whether they also
+/// need to clear in-memory session counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetOutcome {
+    /// Nothing to do.
+    Unchanged,
+    /// First run with this field — the countdown was started, no usage was
+    /// cleared.
+    Initialized,
+    /// The interval elapsed and the usage counters were zeroed.
+    Reset,
+}
+
+/// Applies the configured periodic reset if it's due, mutating `settings`
+/// in place. The caller persists when the outcome isn't `Unchanged`.
+pub fn maybe_auto_reset(settings: &mut AppSettings) -> ResetOutcome {
+    if settings.reset_interval_hours == 0 {
+        return ResetOutcome::Unchanged;
+    }
+
+    let now = now_unix();
+    let interval_secs = (settings.reset_interval_hours as i64).saturating_mul(3_600);
+
+    if settings.last_reset_at <= 0 {
+        settings.last_reset_at = now;
+        return ResetOutcome::Initialized;
+    }
+
+    if now.saturating_sub(settings.last_reset_at) >= interval_secs {
+        settings.tokens_used = 0;
+        settings.usage_by_model.clear();
+        settings.last_reset_at = now;
+        return ResetOutcome::Reset;
+    }
+
+    ResetOutcome::Unchanged
 }
 
 /// Folds one turn's raw usage into the per-model records, creating the
@@ -69,15 +127,25 @@ pub fn add_model_usage(records: &mut Vec<ModelUsageRecord>, provider: &str, mode
     records.sort_by(|a, b| b.weighted_tokens.cmp(&a.weighted_tokens));
 }
 
-/// What the settings UI is allowed to change in one call. Either field can
-/// be omitted: `token_limit` sets the budget, `reset_usage` zeroes the
-/// cumulative counter (e.g. at the start of a new billing period).
+/// What the settings UI is allowed to change in one call. Any field may be
+/// omitted: `token_limit` sets the budget, `reset_usage` zeroes the
+/// cumulative counter (e.g. at the start of a new billing period), and
+/// `reset_interval_hours` changes the automatic reset period.
+///
+/// `rename_all = "camelCase"` is required: Tauri only camelCases *command
+/// argument names*, not the fields of a struct argument, so without this
+/// the frontend's `tokenLimit` / `resetUsage` would silently deserialize to
+/// the defaults and the settings UI would appear to save nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettingsUpdate {
     #[serde(default)]
     pub token_limit: Option<u64>,
     #[serde(default)]
     pub reset_usage: bool,
+    /// New auto-reset interval in hours (`0` = never). Omitted = unchanged.
+    #[serde(default)]
+    pub reset_interval_hours: Option<u64>,
 }
 
 fn config_path() -> Result<std::path::PathBuf> {

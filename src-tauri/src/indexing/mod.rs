@@ -65,6 +65,57 @@ pub fn build_index(root: &Path) -> Result<(FileNode, ScanSummary, IndexStats)> {
     Ok((scan.tree, scan.summary, stats))
 }
 
+/// Lightweight follow-up to an agent action: picks up files that appeared
+/// since the last index (and drops rows for files that vanished) without
+/// re-reading and re-hashing every already-known file. The full
+/// `build_index` still runs when a workspace is opened; this exists only so
+/// a `run_command` that generates files (a scaffold, a codegen step) shows
+/// up in search and the Explorer right away, without making every approval
+/// cost a full read pass over the whole tree.
+///
+/// Caveat: a file that *changed* on disk without going through
+/// `write_file`/`reindex_file` keeps its old symbols until the next full
+/// `build_index`. New files and deletions are always picked up.
+pub fn build_index_shallow(root: &Path) -> Result<(FileNode, IndexStats)> {
+    let scan = scanner::scan(root)?;
+    let conn = db::open_for_workspace(root)?;
+
+    let keep: std::collections::HashSet<String> =
+        scan.files.iter().map(|f| f.relative_path.clone()).collect();
+
+    for file in &scan.files {
+        // Skip anything already indexed — the point of this pass is to be
+        // cheap, so it never re-reads or re-hashes known files.
+        if db::existing_hash(&conn, &file.relative_path)?.is_some() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&file.absolute_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let hash = content_hash(&content);
+        let language = file.language.as_deref();
+        let file_id = db::upsert_file(&conn, &file.relative_path, language, &hash)?;
+        if let Some(language) = language {
+            if parsing::supported_for_symbols(language) {
+                let symbols = parsing::extract_symbols(language, &content);
+                db::replace_symbols(&conn, file_id, &symbols)?;
+            }
+        }
+    }
+
+    db::prune_files(&conn, &keep)?;
+
+    let counts = db::counts(&conn)?;
+    let stats = IndexStats {
+        file_count: counts.file_count,
+        symbol_count: counts.symbol_count,
+        edge_count: counts.edge_count,
+        last_indexed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    Ok((scan.tree, stats))
+}
+
 pub fn stats_for(root: &Path) -> Result<IndexStats> {
     let conn = db::open_for_workspace(root)?;
     let counts = db::counts(&conn)?;

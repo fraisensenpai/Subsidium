@@ -7,6 +7,21 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Shared `reqwest` client for every provider request. `reqwest::Client::new()`
+/// sets **no** timeout, so a provider that accepts the connection but then
+/// stalls — a hung gateway, a dropped network, a proxy that never answers —
+/// would block the agent turn forever. Worse, the Stop button can't interrupt
+/// it: the agent loop only checks the stop flag *after* the provider call
+/// returns. A connect timeout fails fast on an unreachable host; the overall
+/// request timeout bounds a slow or stalled response.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// A single turn in a conversation, provider-agnostic. Used for the
 /// simple one-off "Test Connection" call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +139,14 @@ pub struct ProviderConfig {
     /// server); ignored for "anthropic"/"gemini" (fixed endpoints).
     pub base_url: Option<String>,
     pub model: String,
+    /// Which catalog preset (brand) this account was created from — e.g.
+    /// "openai", "openrouter", "groq", "deepseek", "lmstudio". Descriptive
+    /// only: `provider`, `base_url` and `model` already carry everything the
+    /// request path needs. It lets the UI show the vendor name and offer the
+    /// right curated model list. `None` for accounts created before presets
+    /// existed, or a bare custom endpoint.
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 /// One entry in a provider's model list, returned by each module's
@@ -284,7 +307,10 @@ pub async fn list_models_for(config: &ProviderConfig, api_key: Option<String>) -
             gemini::list_models(&key).await
         }
         "openai_compatible" => {
-            let key = api_key.context("no API key for this account")?;
+            // Local gateways (LM Studio, vLLM, LocalAI) commonly need no
+            // key at all — send an empty one rather than refusing outright;
+            // a real gateway that does need one answers with a clear 401.
+            let key = api_key.unwrap_or_default();
             let base_url = config
                 .base_url
                 .clone()
@@ -313,7 +339,9 @@ pub fn build_provider(config: &ProviderConfig, api_key: Option<String>) -> Resul
             Box::new(gemini::GeminiProvider::new(key, config.model.clone()))
         }
         "openai_compatible" => {
-            let key = api_key.context("no API key for this account")?;
+            // See the note in `list_models_for`: an empty key is allowed so
+            // keyless local servers (LM Studio, vLLM, …) work.
+            let key = api_key.unwrap_or_default();
             let base_url = config
                 .base_url
                 .clone()

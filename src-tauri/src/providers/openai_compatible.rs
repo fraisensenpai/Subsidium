@@ -16,7 +16,7 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 }
@@ -29,7 +29,7 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<ModelSumma
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/models");
 
-    let response = reqwest::Client::new()
+    let response = super::http_client()
         .get(&url)
         .bearer_auth(api_key)
         .send()

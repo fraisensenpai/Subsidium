@@ -14,7 +14,7 @@ impl OllamaProvider {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 }
@@ -25,7 +25,7 @@ pub async fn list_models(base_url: &str) -> Result<Vec<ModelSummary>> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/api/tags");
 
-    let response = reqwest::Client::new()
+    let response = super::http_client()
         .get(&url)
         .send()
         .await

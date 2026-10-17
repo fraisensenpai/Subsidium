@@ -25,6 +25,12 @@ pub fn open_for_workspace(root: &Path) -> Result<Connection> {
     // "database is locked". Conversation history must never be silently
     // lost because of that, so a pragma failure is ignored — everything
     // else (schema, queries) works fine without them.
+    //
+    // `busy_timeout` is the important one: it makes a connection that finds
+    // the DB locked *wait* up to 5s for the writer to finish instead of
+    // failing immediately with SQLITE_BUSY — which is what actually happens
+    // when an index write and a conversation save overlap.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
     let _ = conn.execute_batch("PRAGMA journal_mode = WAL;");
     conn.execute_batch(SCHEMA)?;
@@ -201,5 +207,32 @@ pub fn load_conversation_messages(conn: &Connection, conversation_id: i64) -> Re
 
 pub fn delete_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
     conn.execute("DELETE FROM conversations WHERE id = ?1", params![conversation_id])?;
+    Ok(())
+}
+
+/// Drops `files` rows (and, via `ON DELETE CASCADE`, their symbols) for any
+/// path that is no longer part of `keep`. Used by the lightweight
+/// post-agent rescan so a file that was deleted — by hand or by a command
+/// the agent ran — stops appearing in search and the file listing.
+pub fn prune_files(conn: &Connection, keep: &std::collections::HashSet<String>) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT relative_path FROM files")?;
+    let indexed: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let mut removed = 0usize;
+    for path in indexed {
+        if !keep.contains(&path) {
+            conn.execute("DELETE FROM files WHERE relative_path = ?1", params![path])?;
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        // Keep the symbol FTS shadow table consistent with what's left.
+        conn.execute("INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')", [])?;
+    }
     Ok(())
 }

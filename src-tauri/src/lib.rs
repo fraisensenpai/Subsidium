@@ -9,7 +9,7 @@ mod settings;
 mod terminal;
 mod workspace;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -50,6 +50,16 @@ pub struct AppState {
     /// checks it between steps and returns a "stopped" result as soon as
     /// the in-flight provider call finishes.
     pub agent_stop_requested: Arc<AtomicBool>,
+    /// Bumped whenever the live conversation is replaced — "New
+    /// conversation", loading a past one, or deleting the active one. A
+    /// turn captures this when it starts; if it changed before the turn
+    /// finished, the turn is abandoned and its reply is never written into
+    /// (or persisted as part of) the conversation the user is now in.
+    pub conversation_generation: Arc<AtomicU64>,
+    /// Serializes agent turns so a message sent right after "New
+    /// conversation" can't run at the same time as the turn that reset is
+    /// still unwinding — both would write to the single shared history.
+    pub agent_turn_lock: tauri::async_runtime::Mutex<()>,
 }
 
 impl Default for AppState {
@@ -64,6 +74,8 @@ impl Default for AppState {
             pending_model_usage: Mutex::new(Vec::new()),
             running_terminal: Arc::new(terminal::PtySession::new()),
             agent_stop_requested: Arc::new(AtomicBool::new(false)),
+            conversation_generation: Arc::new(AtomicU64::new(0)),
+            agent_turn_lock: tauri::async_runtime::Mutex::new(()),
         }
     }
 }
@@ -103,8 +115,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::open_workspace,
-            commands::get_project_summary,
             commands::get_index_stats,
+            commands::refresh_file_tree,
             commands::search_workspace,
             commands::read_file,
             commands::write_file,
@@ -127,12 +139,13 @@ pub fn run() {
             commands::delete_conversation,
             commands::git_status,
             commands::git_diff,
-            commands::terminal_run,
             commands::terminal_input,
             commands::terminal_kill,
             commands::terminal_resize,
+            commands::terminal_start_shell,
             commands::get_app_settings,
             commands::save_app_settings,
+            commands::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Subsidium");

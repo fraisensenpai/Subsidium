@@ -10,7 +10,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// necessarily saved anything, so it's a free function rather than a
 /// method on AnthropicProvider (which requires a chosen model to build).
 pub async fn list_models(api_key: &str) -> Result<Vec<ModelSummary>> {
-    let response = reqwest::Client::new()
+    let response = super::http_client()
         .get("https://api.anthropic.com/v1/models")
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -57,7 +57,7 @@ impl AnthropicProvider {
         Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 }
