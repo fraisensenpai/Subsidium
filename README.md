@@ -8,6 +8,13 @@
   A local workspace-intelligence coding agent for your projects.
 </p>
 
+<p>
+  <a href="https://github.com/fraisensenpai/Subsidium/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/fraisensenpai/Subsidium?label=download&style=flat-square&color=174A3A"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-174A3A?style=flat-square"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-174A3A?style=flat-square">
+  <img alt="Built with Tauri" src="https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust%20%2B%20React-174A3A?style=flat-square">
+</p>
+
 <br>
 
 <img src="assets/screenshot.png" alt="Subsidium" width="950">
@@ -15,6 +22,22 @@
 </div>
 
 <br>
+
+## Download
+
+Prebuilt installers are attached to every [release](https://github.com/fraisensenpai/Subsidium/releases/latest). Pick the one for your platform:
+
+| Platform | Installer |
+| --- | --- |
+| **Windows** | `.msi` installer or `.exe` (NSIS) setup |
+| **macOS** | `.dmg` — Apple Silicon and Intel builds |
+| **Linux** | `.deb`, `.rpm` or `.AppImage` |
+
+> **Phase 1 preview.** The builds are produced by CI and are **not code-signed**, so Windows SmartScreen or macOS Gatekeeper may ask you to confirm on first launch. If you would rather skip that, [build from source](#build-from-source) — it is a few commands.
+
+On first launch, pick a workspace folder and configure an AI provider — an API key from one of the [supported providers](#agent-architecture), or a local model through Ollama. Everything except the requests to the provider you choose stays on your machine.
+
+---
 
 ## Overview
 
@@ -187,9 +210,13 @@ The agent communicates with a configured model through a provider abstraction.
 Supported providers include:
 
 * Anthropic
-* Gemini
-* OpenAI-compatible APIs
-* Ollama
+* Google Gemini
+* OpenAI
+* OpenRouter, Groq, DeepSeek, xAI (Grok), Mistral
+* Together, Perplexity, Fireworks, Cerebras, SambaNova, Nebius, Hyperbolic
+* GitHub Models
+* Any custom OpenAI-compatible endpoint
+* Ollama, LM Studio, vLLM and LocalAI (local / self-hosted)
 
 The model does not directly receive the entire workspace.
 
@@ -275,7 +302,7 @@ API keys are stored using the operating system's secure keyring.
 Configure:
 
 * Token budget
-* Usage counter
+* Usage counter with a configurable auto-reset interval (hourly, daily, weekly, …)
 * Theme
 
 ---
@@ -306,9 +333,9 @@ Configure:
 ### Providers
 
 * Anthropic
-* Gemini
-* OpenAI-compatible APIs
-* Ollama
+* Google Gemini
+* OpenAI-compatible APIs (OpenAI, OpenRouter, Groq, DeepSeek, …)
+* Ollama / LM Studio / vLLM (local, OpenAI-compatible)
 
 ---
 
@@ -340,6 +367,7 @@ The core desktop environment and agent loop are working, but the project is stil
 * [x] Multiple AI providers
 * [x] Secure API key storage
 * [x] Dark / light themes
+* [x] Cross-platform installers via CI releases
 
 ### Planned
 
@@ -355,26 +383,51 @@ The core desktop environment and agent loop are working, but the project is stil
 
 ---
 
-## Development
+## Build From Source
 
-Clone the repository:
+### Prerequisites
+
+| Requirement | Notes |
+| --- | --- |
+| [Node.js](https://nodejs.org/) 18+ | 20 recommended |
+| [Rust](https://rustup.rs/) (stable) | install through `rustup` |
+| Platform build tools | see below |
+
+* **Windows** — Microsoft C++ Build Tools (*Desktop development with C++*) and WebView2 (already present on Windows 11).
+* **macOS** — Xcode Command Line Tools: `xcode-select --install`.
+* **Linux** — `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `libgtk-3-dev`, `libxdo-dev`, `patchelf`.
+
+### Run
 
 ```bash
 git clone https://github.com/fraisensenpai/Subsidium.git
 cd Subsidium
-```
-
-Install dependencies:
-
-```bash
 npm install
-```
-
-Start the development application:
-
-```bash
 npm run tauri dev
 ```
+
+### Produce installers
+
+```bash
+npm run tauri build
+```
+
+The bundles land in `src-tauri/target/release/bundle/` — `.msi` / `.exe` on Windows, `.dmg` on macOS, `.deb` / `.rpm` / `.AppImage` on Linux.
+
+Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds all three platforms and publishes them as a downloadable release.
+
+### Checks
+
+```bash
+npm run typecheck
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+---
+
+## Contributing
+
+Contributions and bug reports are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Include your OS, the steps to reproduce and what you expected.
 
 ---
 

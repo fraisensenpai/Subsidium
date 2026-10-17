@@ -2,12 +2,26 @@
   "name": "subsidium",
   "private": true,
   "version": "0.1.0",
+  "description": "Local workspace-intelligence coding agent — file explorer, editor, terminal, search and an approval-gated AI agent in one desktop app.",
+  "license": "MIT",
+  "author": "fraisensenpai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fraisensenpai/Subsidium.git"
+  },
+  "homepage": "https://github.com/fraisensenpai/Subsidium#readme",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",

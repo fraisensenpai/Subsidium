@@ -1,0 +1,92 @@
+name: Release
+
+# Building installers is triggered by pushing a version tag, e.g.
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# Each platform produces its own installers, which the action attaches to a
+# GitHub Release — that is what makes the app downloadable.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      # One platform failing must not cancel the others — a partial release is
+      # still better than none.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS (Apple Silicon)
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            label: macOS (Intel)
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            label: Linux
+            args: ""
+          - platform: windows-latest
+            label: Windows
+            args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build & attach installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Subsidium ${{ github.ref_name }}"
+          releaseBody: |
+            ## Subsidium ${{ github.ref_name }}
+
+            Local workspace-intelligence coding agent — Phase 1 preview.
+
+            Download the installer for your platform below. The builds are produced
+            by CI and are **not code-signed**, so Windows SmartScreen or macOS
+            Gatekeeper may ask you to confirm on first launch.
+
+            ### Assets
+            - **Windows** — `.msi` installer or `.exe` (NSIS) setup
+            - **macOS** — `.dmg` (Apple Silicon and Intel builds)
+            - **Linux** — `.deb`, `.rpm` or `.AppImage`
+          releaseDraft: false
+          prerelease: false

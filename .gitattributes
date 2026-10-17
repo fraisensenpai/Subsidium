@@ -1,0 +1,17 @@
+# Normalize line endings in the repository so diffs stay clean regardless of
+# the platform a change comes from. Git stores LF and checks out the platform
+# default.
+* text=auto
+
+# Binary assets — never line-ending converted.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.db   binary
+
+# Generated lockfiles: keep them out of language stats / collapses diffs.
+package-lock.json   linguist-generated=true
+src-tauri/Cargo.lock linguist-generated=true
